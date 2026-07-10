@@ -40,13 +40,20 @@ curl -fLo ~/.local/bin/overview.sh \
 chmod +x ~/.local/bin/overview.sh
 ```
 
-`~/.tmux.conf`에 키바인딩 추가 후 `tmux source-file ~/.tmux.conf`:
+키바인딩을 **tmux가 실제로 읽는 설정 파일**에 추가하세요. tmux 3.x는 `~/.config/tmux/tmux.conf`가 있으면 그걸 읽고 `~/.tmux.conf`는 무시합니다 (`prefix + a` 무반응 1위 원인). 파일 확인: `tmux display -p '#{config_files}'`.
 
 ```tmux
 # tmux-overview (키는 자유롭게 변경 가능)
 bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"   # 밖: 대시보드 열기 / 안: 포커스 타일 세션으로 진입
 bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"  # 강제 리빌드 (보통 불필요 — 자동 갱신됨)
 bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"     # 안: 포커스 타일 세션으로 진입
+```
+
+추가 후 리로드하고 등록 확인 (3줄 나와야 정상):
+
+```sh
+tmux source-file <위에서 확인한 파일>
+tmux list-keys | grep overview.sh
 ```
 
 TPM 사용자는 `set -g @plugin 'justice-hwan/tmux-overview'` 한 줄 후 `prefix + I`. 키 변경은 `@overview-key`, `@overview-rebuild-key`, `@overview-enter-key` 옵션으로.
@@ -80,6 +87,17 @@ bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 $HOME/.local/bin/ove
 - 각 세션의 **활성 window의 활성 pane**만 미러링.
 - RUN/IDLE은 출력 기반 휴리스틱 (조용히 생각 중인 에이전트는 IDLE로 보임).
 - `OVERVIEW_EXCLUDE_SELF`는 build 시점에만 적용 — 훅 자동 갱신이 런처 세션을 다시 추가할 수 있음 (지속 제외는 필터 패턴 사용).
+
+## 문제 해결
+
+**`prefix + a` 무반응.** 스크립트·tmux는 대개 정상이고, 키바인딩이 안 올라간 겁니다 (제일 흔한 설치 실수). 먼저 확인:
+
+```sh
+tmux list-keys | grep overview.sh   # 3줄 나와야 정상
+```
+
+- **아무것도 안 나옴** → 바인딩 미로드. 보통 설정을 tmux가 안 읽는 파일에 넣은 것: tmux 3.x는 `~/.config/tmux/tmux.conf`가 있으면 그걸 읽고 `~/.tmux.conf`는 무시합니다. `tmux display -p '#{config_files}'`로 진짜 파일을 찾아 거기에 넣고 `tmux source-file`. 도구 동작만 먼저 확인하려면 실행 중 tmux에 직접 바인딩: `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
+- **3줄 나오는데도 안 됨** → prefix를 잘못 눌렀거나 키 충돌. `tmux show -g prefix`로 prefix 확인(기본 `C-b`) 후 그 prefix + `a`. `C-a`가 prefix면 `a`와 충돌할 수 있으니 다른 키로.
 
 ## 제거
 

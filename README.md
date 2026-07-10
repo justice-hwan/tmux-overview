@@ -59,8 +59,21 @@ curl -fLo ~/.local/bin/overview.sh \
   https://raw.githubusercontent.com/justice-hwan/tmux-overview/main/overview.sh
 chmod +x ~/.local/bin/overview.sh
 
-# 2. Add keybindings to ~/.tmux.conf (see below), then reload:
-tmux source-file ~/.tmux.conf
+# 2. Add the keybindings to the config file tmux ACTUALLY loads.
+#    On tmux 3.x that is ~/.config/tmux/tmux.conf if it exists, else ~/.tmux.conf
+#    — editing the wrong file is the #1 reason `prefix + a` does nothing.
+conf=$(tmux display -p '#{config_files}' 2>/dev/null | cut -d, -f1)
+: "${conf:=$HOME/.tmux.conf}"
+cat >> "$conf" <<'EOF'
+
+# tmux-overview
+bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"
+bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"
+bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
+EOF
+
+# 3. Reload, then confirm the three keys registered (this is the check that catches setup mistakes):
+tmux source-file "$conf" && tmux list-keys | grep overview.sh
 ```
 
 Or clone the repo and run the bundled installer, which copies the script to `${XDG_BIN_HOME:-$HOME/.local/bin}` and prints the keybinding snippet:
@@ -171,6 +184,34 @@ Honest constraints, by design or by tmux's nature:
 - **RUN/IDLE is a heuristic.** It keys off screen output. An agent that thinks silently without repainting reads IDLE; "done" and "waiting for input" both read IDLE.
 - **The dashboard is itself a tmux session**, so it appears in `list-sessions` and session pickers (rename via `OVERVIEW_SESSION` if you want it sorted out of the way).
 - **`OVERVIEW_EXCLUDE_SELF` applies at build time only.** A later hook-driven reconcile only knows `@overview_filter`, so it can add the launcher session back. For a persistent exclusion, use a build filter pattern instead.
+
+## Troubleshooting
+
+**`prefix + a` does nothing / no reaction.** The script and tmux are almost always fine — the keybinding simply isn't loaded. This is the most common setup issue. Check first:
+
+```sh
+tmux list-keys | grep overview.sh     # should print three lines
+```
+
+- **Prints nothing** → the bindings aren't loaded, usually because the config edit landed in a file tmux doesn't read. tmux 3.x loads `~/.config/tmux/tmux.conf` if it exists and **ignores `~/.tmux.conf`**. Find the real file and reload:
+
+  ```sh
+  tmux display -p '#{config_files}'   # the file(s) tmux actually loaded
+  # put the bind-key lines in that file, then:
+  tmux source-file "<that file>"
+  ```
+
+  To confirm the tool itself works in the meantime, bind live (no file needed): `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
+
+- **Prints the three lines but the key still does nothing** → you're pressing the wrong prefix, or `a` is shadowed. Check your prefix (default `C-b`) and press *that*, then `a`:
+
+  ```sh
+  tmux show -g prefix
+  ```
+
+  If your prefix is `C-a`, the `a` key may clash — bind a different one (e.g. `bind-key g ...`).
+
+**Tiles are blank or show the wrong thing** → a tile mirrors only the *active pane of the active window* of each session; make sure that's where your agent is. On tmux < 3.0 (no pane-scoped user options) the grid can misbehave — check `tmux -V`.
 
 ## Uninstall
 
