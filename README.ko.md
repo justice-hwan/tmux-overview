@@ -33,30 +33,54 @@ tmux **3.2 이상** (3.6에서 개발·검증), POSIX `sh`. macOS/Linux.
 
 ## 설치
 
+### 수동 설치
+
 ```sh
+# 1. overview.sh를 PATH 어딘가에 배치 (위치는 자유):
 mkdir -p ~/.local/bin
 curl -fLo ~/.local/bin/overview.sh \
   https://raw.githubusercontent.com/justice-hwan/tmux-overview/main/overview.sh
 chmod +x ~/.local/bin/overview.sh
+
+# 2. tmux 설정 파일(보통 ~/.tmux.conf; ~/.config/tmux/tmux.conf를 쓰면 거기에)에 키바인딩 추가:
+cat >> ~/.tmux.conf <<'EOF'
+
+# tmux-overview
+bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"
+bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"
+bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
+EOF
+
+# 3. 리로드 후 반드시 등록 확인 — 3줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것
+#    (실제 로드 파일 확인: tmux display -p '#{config_files}')
+tmux source-file ~/.tmux.conf
+tmux list-keys | grep overview.sh          # 3줄 나와야 정상; 비면 아래 '문제 해결' 참고
 ```
 
-키바인딩을 tmux 설정 파일(보통 `~/.tmux.conf`; `~/.config/tmux/tmux.conf`를 쓰면 거기에) 에 추가하세요.
-
-```tmux
-# tmux-overview (키는 자유롭게 변경 가능)
-bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"   # 밖: 대시보드 열기 / 안: 포커스 타일 세션으로 진입
-bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"  # 강제 리빌드 (보통 불필요 — 자동 갱신됨)
-bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"     # 안: 포커스 타일 세션으로 진입
-```
-
-추가 후 리로드하고 **반드시 등록 확인** — 3줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것 (`tmux display -p '#{config_files}'`로 실제 로드되는 파일 확인):
+또는 repo를 클론해서 번들 설치 스크립트를 실행하면 `${XDG_BIN_HOME:-$HOME/.local/bin}`에 복사하고 키바인딩 스니펫을 출력해줍니다:
 
 ```sh
-tmux source-file ~/.tmux.conf
-tmux list-keys | grep overview.sh   # 3줄 나와야 정상
+git clone https://github.com/justice-hwan/tmux-overview.git
+cd tmux-overview && ./install.sh
 ```
 
-TPM 사용자는 `set -g @plugin 'justice-hwan/tmux-overview'` 한 줄 후 `prefix + I`. 키 변경은 `@overview-key`, `@overview-rebuild-key`, `@overview-enter-key` 옵션으로.
+키는 자유롭게 바꿀 수 있어요(제안일 뿐). 특히 **`C-a`를 prefix로 쓰면** `prefix + a`가 충돌할 수 있으니 다른 키(`bind-key g ...` 등)로 하세요. 스크립트 자체는 키를 바인딩하지 않습니다.
+
+### TPM (Tmux Plugin Manager)
+
+`~/.tmux.conf`에 아래 한 줄을 넣고 `prefix + I`:
+
+```tmux
+set -g @plugin 'justice-hwan/tmux-overview'
+```
+
+기본 키 커스터마이즈:
+
+```tmux
+set -g @overview-key 'a'            # 토글 (기본: a)
+set -g @overview-rebuild-key 'A'    # 강제 리빌드 (기본: A)
+set -g @overview-enter-key 'Enter'  # 타일 진입 (기본: Enter)
+```
 
 ## 사용 흐름
 
