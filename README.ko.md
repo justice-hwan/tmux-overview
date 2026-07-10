@@ -22,7 +22,7 @@
 
 ## 핵심 동작
 
-- 타일마다 대상 세션의 활성 pane을 `tmux capture-pane -ep`로 약 1초 주기 미러 (ANSI 색 보존, 하단 정렬, 깜빡임 없음)
+- 타일마다 대상 세션의 활성 pane을 `tmux capture-pane -ep`로 약 1초 주기 미러 (ANSI 색 보존, 하단 정렬, 각 줄을 타일 너비로 잘라내 넓은 TUI도 안 깨짐, 깜빡임 없음)
 - 헤더에 세션명 + 실행 중인 명령 + 상태: 최근 3초 내 출력 있으면 **RUN**(녹색), 아니면 **IDLE Ns**(노랑), 세션이 사라지면 빨간 배너
 - `session-created`/`session-closed` 전역 훅(인덱스 `[99]`, 기존 훅과 공존)으로 세션 생성/종료 시 타일 자동 추가/제거. 대시보드가 없어지면 훅은 스스로 해제
 - 타일에 포커스를 두고 키 하나로 그 세션에 full-screen 진입(`switch-client` — 같은 클라이언트라 리사이즈 부작용 없음), 같은 키로 대시보드 복귀
@@ -40,7 +40,7 @@ curl -fLo ~/.local/bin/overview.sh \
 chmod +x ~/.local/bin/overview.sh
 ```
 
-키바인딩을 **tmux가 실제로 읽는 설정 파일**에 추가하세요. tmux 3.x는 `~/.config/tmux/tmux.conf`가 있으면 그걸 읽고 `~/.tmux.conf`는 무시합니다 (`prefix + a` 무반응 1위 원인). 파일 확인: `tmux display -p '#{config_files}'`.
+키바인딩을 tmux 설정 파일(보통 `~/.tmux.conf`; `~/.config/tmux/tmux.conf`를 쓰면 거기에) 에 추가하세요.
 
 ```tmux
 # tmux-overview (키는 자유롭게 변경 가능)
@@ -49,11 +49,11 @@ bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"  # 강제 리빌
 bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"     # 안: 포커스 타일 세션으로 진입
 ```
 
-추가 후 리로드하고 등록 확인 (3줄 나와야 정상):
+추가 후 리로드하고 **반드시 등록 확인** — 3줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것 (`tmux display -p '#{config_files}'`로 실제 로드되는 파일 확인):
 
 ```sh
-tmux source-file <위에서 확인한 파일>
-tmux list-keys | grep overview.sh
+tmux source-file ~/.tmux.conf
+tmux list-keys | grep overview.sh   # 3줄 나와야 정상
 ```
 
 TPM 사용자는 `set -g @plugin 'justice-hwan/tmux-overview'` 한 줄 후 `prefix + I`. 키 변경은 `@overview-key`, `@overview-rebuild-key`, `@overview-enter-key` 옵션으로.
@@ -83,7 +83,7 @@ bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 $HOME/.local/bin/ove
 ## 한계 (정직하게)
 
 - **읽기전용 + 최대 1초 지연.** 타일에서 입력·스크롤백 불가. 개입은 줌으로.
-- 대상 세션이 타일보다 넓으면 긴 줄이 래핑됨. 실용 타일 수는 약 190×50 기준 **6~9개** (초과 시 경고 후 잔여 세션 스킵) — 필터 사용 권장.
+- 대상이 타일보다 넓으면 각 줄을 타일 너비로 **잘라냄**(ANSI·UTF-8 인식) — 래핑으로 깨지는 대신 왼쪽 일부만 깔끔하게 보임. 실용 타일 수는 약 190×50 기준 **6~9개** (초과 시 경고 후 스킵) — 필터 사용 권장.
 - 각 세션의 **활성 window의 활성 pane**만 미러링.
 - RUN/IDLE은 출력 기반 휴리스틱 (조용히 생각 중인 에이전트는 IDLE로 보임).
 - `OVERVIEW_EXCLUDE_SELF`는 build 시점에만 적용 — 훅 자동 갱신이 런처 세션을 다시 추가할 수 있음 (지속 제외는 필터 패턴 사용).
@@ -96,7 +96,7 @@ bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 $HOME/.local/bin/ove
 tmux list-keys | grep overview.sh   # 3줄 나와야 정상
 ```
 
-- **아무것도 안 나옴** → 바인딩 미로드. 보통 설정을 tmux가 안 읽는 파일에 넣은 것: tmux 3.x는 `~/.config/tmux/tmux.conf`가 있으면 그걸 읽고 `~/.tmux.conf`는 무시합니다. `tmux display -p '#{config_files}'`로 진짜 파일을 찾아 거기에 넣고 `tmux source-file`. 도구 동작만 먼저 확인하려면 실행 중 tmux에 직접 바인딩: `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
+- **아무것도 안 나옴** → 바인딩 미로드. bind-key를 안 넣었거나, 리로드를 안 했거나, tmux가 안 읽는 파일에 넣은 것. `tmux display -p '#{config_files}'`로 실제 로드되는 파일을 확인해 거기에 넣고 `tmux source-file`. 도구 동작만 먼저 확인하려면 실행 중 tmux에 직접 바인딩: `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
 - **3줄 나오는데도 안 됨** → prefix를 잘못 눌렀거나 키 충돌. `tmux show -g prefix`로 prefix 확인(기본 `C-b`) 후 그 prefix + `a`. `C-a`가 prefix면 `a`와 충돌할 수 있으니 다른 키로.
 
 ## 제거
