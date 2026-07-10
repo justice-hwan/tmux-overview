@@ -102,10 +102,26 @@ tmux list-keys | grep overview.sh   # 3줄 나와야 정상
 ## 제거
 
 ```sh
-overview.sh kill    # 대시보드 세션 + 훅 제거
+# 1. 대시보드 세션 + 전역 훅 제거:
+~/.local/bin/overview.sh kill
+
+# 2. tmux 설정 파일에서 bind-key 3줄 삭제 후 리로드
+#    (파일 경로 확인: tmux display -p '#{config_files}')
+
+# 3. 스크립트 삭제:
+rm ~/.local/bin/overview.sh
 ```
 
-이후 keybinding과 스크립트를 삭제하면 끝. 자세한 내용과 설계 근거는 [README.md](./README.md), [docs/DESIGN.md](./docs/DESIGN.md) 참고.
+`overview.sh kill`을 안 하고 스크립트부터 지웠다면, 남은 훅은 수동으로:
+
+```sh
+tmux set-hook -gu 'session-created[99]'
+tmux set-hook -gu 'session-closed[99]'
+```
+
+**TPM 사용자:** `set -g @plugin 'justice-hwan/tmux-overview'` 줄을 지우고 `prefix + alt + u`.
+
+자세한 설계 근거는 [README.md](./README.md) · [docs/DESIGN.md](./docs/DESIGN.md).
 
 ## 라이선스
 

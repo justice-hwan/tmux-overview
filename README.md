@@ -216,15 +216,24 @@ tmux list-keys | grep overview.sh     # should print three lines
 ## Uninstall
 
 ```sh
-overview.sh kill        # removes the dashboard session and its hooks
+# 1. Stop the dashboard and remove its global hooks:
+~/.local/bin/overview.sh kill
+
+# 2. Delete the three bind-key lines from your tmux config, then reload.
+#    Use the file `tmux display -p '#{config_files}'` reports.
+
+# 3. Delete the script:
+rm ~/.local/bin/overview.sh
 ```
 
-Then delete the keybindings from `~/.tmux.conf` and remove the script (or the TPM plugin line). If you ever need to clear the hooks by hand:
+If you deleted the script *before* running `kill`, clear the leftover hooks by hand:
 
 ```sh
 tmux set-hook -gu 'session-created[99]'
 tmux set-hook -gu 'session-closed[99]'
 ```
+
+**TPM users:** remove the `set -g @plugin 'justice-hwan/tmux-overview'` line and press `prefix + alt + u`.
 
 ## Contributing
 
