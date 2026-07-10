@@ -12,32 +12,32 @@ If you run several AI coding agents (Claude Code, Codex, Aider, ...) in separate
 
 ## Demo
 
-![tmux-overview — six live sessions mirrored in one grid, each with a RUN/IDLE header](./assets/overview.png)
+![tmux-overview — six live sessions mirrored in one grid, each with a RUN/IDLE border](./assets/overview.png)
 
 <details>
 <summary>Text-only preview (for environments where the image doesn't render)</summary>
 
 ```
-┌ agent-api ─────────────────────────────┐┌ agent-web ─────────────────────────────┐
-│ agent-api [node]  RUN                  ││ agent-web [node]  IDLE 42s             │
+┌ RUN  agent-api [node] ─────────────────┐┌ IDLE 42s  agent-web [node] ────────────┐
 │ ⏺ Running tests… (esc to interrupt)    ││ ❯ Plan ready. Proceed? (y/n)           │
 │   PASS src/routes/auth.test.ts         ││                                        │
+│   PASS src/routes/user.test.ts         ││                                        │
 └────────────────────────────────────────┘└────────────────────────────────────────┘
-┌ agent-docs ────────────────────────────┐┌ scratch ───────────────────────────────┐
-│ agent-docs [claude]  RUN               ││ scratch [zsh]  IDLE 317s               │
+┌ RUN  agent-docs [claude] ──────────────┐┌ IDLE 317s  scratch [zsh] ──────────────┐
 │ ⏺ Editing migration guide…             ││ ~ $                                    │
 │   +42 −7 README.md                     ││                                        │
+│                                        ││                                        │
 └────────────────────────────────────────┘└────────────────────────────────────────┘
 ```
 
 </details>
 
-Green header = output flowing in the last few seconds (agent busy). Yellow header = output stopped for N seconds (waiting for input, or done). Red banner = session ended.
+Green border = output flowing in the last few seconds (agent busy). Yellow border = output stopped for N seconds (waiting for input, or done). Red border = session ended.
 
 ## Features
 
 - **Live tiled mirror of all sessions.** Each tile mirrors one session's active pane via `tmux capture-pane -ep` about once a second — ANSI colors preserved, output bottom-aligned (where agent activity is), and each line hard-truncated (ANSI- and UTF-8-aware) to the tile width so a wider agent TUI stays aligned instead of wrapping into a broken mess. Flicker-free repaint.
-- **RUN / IDLE status per tile.** Based on `window_activity`: output within the last 3 s → **RUN** (green); otherwise **IDLE Ns** (yellow). Since agents keep the screen updating while working (spinners, streaming), this cleanly separates "busy" from "waiting for you".
+- **RUN / IDLE status on each tile's border.** Shown in the tile's top border — the divider that also carries the session name — and drawn by tmux itself, so it never flickers. Based on `window_activity`: output within the last 3 s → **RUN** (green); otherwise **IDLE Ns** (yellow); a vanished session shows **DEAD** (red). The color changes live with state. Since agents keep the screen updating while working (spinners, streaming), this cleanly separates "busy" from "waiting for you".
 - **Self-updating grid.** Global `session-created` / `session-closed` hooks (registered at index `[99]`, so they coexist with your own hooks) reconcile the grid automatically — new sessions get a tile, closed ones lose theirs. If the dashboard is gone, the hooks remove themselves.
 - **One-key zoom.** Focus a tile, hit a key, and you `switch-client` full-screen into that session — same terminal client, so no nested-attach resize side effects. Same key brings you back to the grid.
 - **Session filtering.** `build '<pattern>'` shows only matching sessions; the pattern is remembered in the `@overview_filter` session option so hook-driven updates respect it.
@@ -168,8 +168,8 @@ bind-key A run-shell "$HOME/.local/bin/overview.sh build '^agent-'"
 
 ## How it works
 
-- **Mirroring.** Each tile runs `overview.sh mirror <session>`: a loop that captures the target session's active pane with `tmux capture-pane -ep` (`-e` preserves ANSI colors/attributes), takes the bottom `rows − 1` lines, hard-truncates each to the tile width with an ANSI-aware `awk` pass (SGR color sequences are copied uncounted, UTF-8 multibyte glyphs count as one, a reset is appended on cut), and repaints the tile using cursor-home + per-line erase escapes (`ESC[H`, `ESC[K`, `ESC[J`) — no full clears, so no flicker. Capturing is a pure read: the target session is never attached, resized, or sent input.
-- **State detection.** The header compares `#{window_activity}` (last output, epoch seconds) against now. Within `OVERVIEW_IDLE_SEC` → RUN; beyond it → IDLE with the idle duration. If the target session vanishes, the tile shows a red `session ended` banner until reconcile removes it. The header also shows `#{pane_current_command}` so you can see what's running.
+- **Mirroring.** Each tile runs `overview.sh mirror <session>`: a loop that captures the target session's active pane with `tmux capture-pane -ep` (`-e` preserves ANSI colors/attributes), takes the bottom `rows` lines (the status label lives on the border, so the whole pane body is content), hard-truncates each to the tile width with an ANSI-aware `awk` pass (SGR color sequences are copied uncounted, UTF-8 multibyte glyphs count as one, a reset is appended on cut), and repaints the tile using cursor-home + per-line erase escapes (`ESC[H`, `ESC[K`, `ESC[J`) — no full clears, so no flicker. Capturing is a pure read: the target session is never attached, resized, or sent input.
+- **State detection.** The mirror loop compares `#{window_activity}` (last output, epoch seconds) against now — within `OVERVIEW_IDLE_SEC` → RUN, beyond it → IDLE with the idle duration — and writes the result into pane-local options (`@ov_state`, `@ov_idle`, `@ov_cmd`) only when it changes. The tile's top border, set via `pane-border-format`, renders those into a colored RUN/IDLE/DEAD label beside the session name and `#{pane_current_command}`; because tmux redraws the border itself, the color updates with state without the per-second in-pane repaint that used to flicker. If the target session vanishes, the border turns red **DEAD** and the pane shows a `session ended` banner until reconcile removes it.
 - **Grid reconciliation.** `build` registers two global hooks, `session-created[99]` and `session-closed[99]`, that call `overview.sh reconcile`. Reconcile diffs the live session list (through `@overview_filter`) against the grid — each tile carries its target in a `@mirror_target` pane option — then adds missing tiles, kills stale ones, and re-applies the `tiled` layout. The high hook index keeps your own `session-created`/`session-closed` hooks untouched, and if the dashboard session no longer exists, reconcile unregisters the hooks (self-healing).
 - **Zoom.** Reads the focused pane's `@mirror_target` and runs `switch-client -t <target>`. Because it's the same terminal client switching sessions (not a nested attach), the target keeps its size — no reflow damage to running TUIs. The empirical study behind this design is in [docs/DESIGN.md](./docs/DESIGN.md).
 

@@ -16,10 +16,12 @@
 #      OVERVIEW_IDLE_SEC (RUN->IDLE threshold, default 3), OVERVIEW_INTERVAL
 #      (refresh seconds, default 1), OVERVIEW_EXCLUDE_SELF=1 (hide launcher session).
 #
-# Tile state: RUN (green) if the target produced output within the last
-# OVERVIEW_IDLE_SEC seconds, otherwise IDLE Ns (yellow). AI agents keep the
-# screen updating (spinners/streaming) while working, so RUN = busy and
-# IDLE = waiting for input (or done) is a reliable heuristic.
+# Tile state is shown on each tile's top border (drawn by tmux, so it never
+# flickers): RUN (green) if the target produced output within the last
+# OVERVIEW_IDLE_SEC seconds, otherwise IDLE Ns (yellow); DEAD (red) if the
+# target session is gone. AI agents keep the screen updating (spinners/
+# streaming) while working, so RUN = busy and IDLE = waiting for input (or
+# done) is a reliable heuristic.
 
 DASH="${OVERVIEW_SESSION:-overview}"
 DASH_W="${OVERVIEW_WIDTH:-188}"
@@ -29,6 +31,14 @@ INTERVAL="${OVERVIEW_INTERVAL:-1}"
 # Resolve to an absolute path so hook / keybinding sub-invocations always work.
 SELF_PATH=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
 [ -f "$SELF_PATH" ] || SELF_PATH="$0"
+
+# Per-tile status shown on the pane's top border. tmux redraws the border
+# itself, so the colour never flickers the way a per-second in-pane repaint did.
+# The mirror loop writes these pane-local user options only when they change:
+#   @ov_state  RUN | IDLE | DEAD      @ov_idle  idle seconds      @ov_cmd  [command]
+# Colours are written as separate #[..] blocks on purpose: a comma inside a
+# #{?..} conditional is parsed as a branch separator, so #[fg=x,bg=y] would break it.
+BORDER_FMT='#{?#{==:#{@ov_state},RUN},#[fg=black]#[bg=green] RUN ,#{?#{==:#{@ov_state},DEAD},#[fg=white]#[bg=red] DEAD ,#[fg=black]#[bg=yellow] IDLE #{@ov_idle}s }}#[default] #{pane_title} #{@ov_cmd}'
 
 # tmux target for the dashboard's single window (by id, so base-index doesn't matter).
 dash_win() { tmux list-windows -t "=$DASH" -F '#{window_id}' 2>/dev/null | head -n1; }
@@ -69,28 +79,38 @@ clip_to_width() {
 mirror() {
   t="$1"
   esc=$(printf '\033')
+  # Self-reference MUST use $TMUX_PANE: `tmux display -p` without -t resolves to
+  # the window's ACTIVE pane, not the pane this loop is running in.
+  me="$TMUX_PANE"
+  [ -n "$me" ] || me=$(tmux display -p '#{pane_id}' 2>/dev/null)
+  last=""
   while :; do
-    rows=$(tmux display -p '#{pane_height}' 2>/dev/null) || exit 0
-    cols=$(tmux display -p '#{pane_width}' 2>/dev/null)
+    rows=$(tmux display -p -t "$me" '#{pane_height}' 2>/dev/null) || exit 0
+    cols=$(tmux display -p -t "$me" '#{pane_width}' 2>/dev/null)
     a=$(tmux display -p -t "=$t:" '#{window_activity}' 2>/dev/null)
     if [ -z "$a" ]; then
+      # target session is gone: red DEAD on the border + an in-pane banner
+      [ "$last" = DEAD ] || { tmux set -p -t "$me" @ov_state DEAD 2>/dev/null; last=DEAD; }
       printf '%s[H%s[41;37m %s: session ended %s[0m%s[J' "$esc" "$esc" "$t" "$esc" "$esc"
       sleep 2
       continue
     fi
     now=$(date +%s)
     idle=$((now - a))
-    if [ "$idle" -le "$IDLE_SEC" ]; then
-      state="RUN"
-      col='42;30'   # green background = output flowing (agent busy)
-    else
-      state="IDLE ${idle}s"
-      col='43;30'   # yellow background = no recent output (waiting for input / done)
+    if [ "$idle" -le "$IDLE_SEC" ]; then st="RUN"; id=""; else st="IDLE"; id="$idle"; fi
+    cmd=$(tmux display -p -t "=$t:" '#{pane_current_command}' 2>/dev/null)
+    [ -n "$cmd" ] && cmd="[$cmd]"
+    sig="$st/$id/$cmd"
+    if [ "$sig" != "$last" ]; then
+      # Update border state only on change; the write itself makes tmux repaint
+      # the border, so there is no per-second in-pane redraw to flicker.
+      tmux set -p -t "$me" @ov_state "$st" 2>/dev/null
+      tmux set -p -t "$me" @ov_idle  "$id"  2>/dev/null
+      tmux set -p -t "$me" @ov_cmd   "$cmd" 2>/dev/null
+      last="$sig"
     fi
-    hdr=$(tmux display -p -t "=$t:" '#{session_name} [#{pane_current_command}]' 2>/dev/null)
     printf '%s[H' "$esc"
-    printf '%s[%sm %s  %s %s[0m%s[K\n' "$esc" "$col" "$hdr" "$state" "$esc" "$esc"
-    tmux capture-pane -ep -t "=$t:" 2>/dev/null | tail -n $((rows - 1)) | clip_to_width "$cols"
+    tmux capture-pane -ep -t "=$t:" 2>/dev/null | tail -n "$rows" | clip_to_width "$cols"
     printf '%s[J' "$esc"
     sleep "$INTERVAL"
   done
@@ -114,6 +134,7 @@ unset_hooks() {
 add_tile() {
   _p=$(tmux split-window -d -P -F '#{pane_id}' -t "$1" "$(tile_cmd "$2")" 2>/dev/null) || return 1
   tmux set -p -t "$_p" @mirror_target "$2"
+  tmux set -p -t "$_p" @ov_state RUN            # seed so the border shows RUN, not "IDLE s", before the first mirror tick
   tmux select-pane -t "$_p" -T "$2"
 }
 
@@ -175,6 +196,7 @@ build() {
       win=$(tmux new-session -d -s "$DASH" -x "$DASH_W" -y "$DASH_H" -P -F '#{window_id}' "$(tile_cmd "$t")")
       p=$(tmux list-panes -t "$win" -F '#{pane_id}' | head -n1)
       tmux set -p -t "$p" @mirror_target "$t"
+      tmux set -p -t "$p" @ov_state RUN
       tmux select-pane -t "$p" -T "$t"
     else
       add_tile "$win" "$t" || echo "warn: could not add tile for '$t' (grid full?)" >&2
@@ -186,7 +208,7 @@ EOF
   [ -n "$win" ] || { echo "no target sessions"; exit 1; }
 
   tmux set -w -t "$win" pane-border-status top
-  tmux set -w -t "$win" pane-border-format ' #{pane_title} '
+  tmux set -w -t "$win" pane-border-format "$BORDER_FMT"
   tmux set -t "$DASH" status-style 'bg=colour24,fg=white'
   tmux set -t "$DASH" @overview_filter "$filter"   # remembered so hook-driven reconcile respects the same filter
   set_hooks                                         # auto-refresh grid on any session create/close

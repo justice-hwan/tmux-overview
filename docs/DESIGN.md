@@ -37,7 +37,7 @@ conclusion stands.
 ## 3. Why the hybrid (c) wins
 
 1. **Monitoring is fully covered by (b).** For "glance at what every agent is doing", a 1-second
-   mirror is plenty, and a RUN/IDLE header carries more information than flipping through
+   mirror is plenty, and a RUN/IDLE status readout carries more information than flipping through
    sessions one by one.
 2. **Intervention is better served by zoom.** A TUI like Claude Code is unpleasant to drive inside
    a narrow tile even if it were interactive. You want full size to type anyway; `switch-client`
@@ -57,8 +57,11 @@ session "overview"  (dedicated session; excluded from its own mirror targets)
     └── ...      (at 188×53: six tiles of roughly 93×17 each, measured)
 ```
 
-The first row of every tile is a status header (background color encodes state); the rest mirrors
-the bottom `rows − 1` lines of the target session's active pane.
+Each tile's status lives on its **top border**, not inside the pane: a color-coded RUN/IDLE/DEAD
+label next to the session name, drawn by tmux via `pane-border-format`. The whole pane body then
+mirrors the bottom `rows` lines of the target session's active pane. (Status started as an in-pane
+first-row header, but a per-second repaint of that row flickered; moving it to the tmux-drawn
+border removed the flicker and freed one body row.)
 
 ### 4.2 Mirror loop
 
@@ -68,7 +71,7 @@ the bottom `rows − 1` lines of the target session's active pane.
   residue) + a final `ESC[J` — flicker-free. Capturing into a shell variable
   (`body=$(...)`) lets command substitution strip trailing blank lines, which makes the bottom
   alignment clean.
-- **Bottom alignment**: `| tail -n $((rows − 1))` — agent activity is always at the bottom of the
+- **Bottom alignment**: `| tail -n "$rows"` — agent activity is always at the bottom of the
   screen, so tail is the right crop.
 - **Interval**: 1 s by default (`OVERVIEW_INTERVAL`). Measured headroom is large (six tiles at
   1 s ≈ 0.7 % CPU on the tmux server); adaptive polling (fast while RUN, slow while IDLE) is a
@@ -79,9 +82,9 @@ the bottom `rows − 1` lines of the target session's active pane.
 | Signal | Mechanism (measured) | Interpretation |
 |---|---|---|
 | Busy vs waiting | `#{window_activity}` epoch — updates every second while output streams | `now − activity ≤ OVERVIEW_IDLE_SEC` → **RUN** (spinner/streaming = agent working); otherwise **IDLE Ns** (output stopped = waiting for input, or done) |
-| What is running | `#{pane_current_command}` | shown in the header (`node`, `claude`, `zsh`, ...) |
-| Tile title | `select-pane -T` + `pane-border-status top` + `pane-border-format ' #{pane_title} '` | session name on the tile border |
-| Session death | `tmux display -p -t <t>:` failing | red "session ended" banner |
+| What is running | `#{pane_current_command}` | written to `@ov_cmd`, shown on the border (`[node]`, `[claude]`, `[zsh]`, ...) |
+| Status render | pane-local `@ov_state` / `@ov_idle` / `@ov_cmd` (written only on change) + `select-pane -T` + `pane-border-status top` + a `pane-border-format` conditional on `@ov_state` | color-coded RUN/IDLE/DEAD label + session name on the tile's top border; the `@ov_state` write itself makes tmux repaint the border, so there is no per-second in-pane redraw to flicker |
+| Session death | empty `#{window_activity}` for the target | border turns red **DEAD** + in-pane "session ended" banner |
 
 The RUN/IDLE split is a deliberate heuristic: AI agents repaint the screen continuously while
 working, so "output stopped for N seconds" is a strong proxy for "wants input". Its failure modes
