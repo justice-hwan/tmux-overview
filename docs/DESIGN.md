@@ -144,7 +144,7 @@ of which must pass before `@overview_filter` is touched:
 
 **BRE → ERE.** `targets_for()`'s matcher changed from `grep -e` (POSIX Basic RE) to `grep -E -e`
 (POSIX Extended RE) — the only semantic change to pre-existing behavior in this feature (see the
-compatibility note below `targets_for()` and the repo's risk log). The common subset (`^ $ . [] *`
+compatibility note above `targets_for()` in `overview.sh`, and `CHANGELOG.md`). The common subset (`^ $ . [] *`
 and literals) is unaffected; only patterns relying on BRE's backslashed metacharacters (`\|` `\(`
 `\{`) change meaning. ERE was chosen over keeping BRE because the user-facing ask was "regex
 filtering," which implies unescaped alternation (`agent-(a|b)`) — the natural reading of "regex" to
@@ -228,6 +228,7 @@ Feature-by-feature floor of everything the script uses:
 | `show-options -v` (value-only) | 1.8 |
 | `pane-border-status` / `pane-border-format` | 2.3 |
 | `select-pane -T` (pane titles) | 2.6 |
+| `copy-mode -q` (mirror self-heal kicks a stray tile out of copy-mode each tick) | long-standing (predates 3.0; no CHANGES entry introduces it) |
 | **Pane user options** (`set -p @mirror_target`, `#{@mirror_target}` in formats) | **3.0** |
 | **Indexed/array hooks** (`set-hook -g 'session-created[99]'`, `-gu` with index) | **3.0** (hooks moved into the options tree as array options) |
 | `attach -r` implying `ignore-size` (only referenced in §2.1, not required by the script) | 3.2 |

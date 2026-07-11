@@ -110,6 +110,16 @@ set -g @overview-menu-key 'C-a'     # filter/pick pop-up menu (default: C-a)
 
 The filter and pick controls live in a small pop-up menu (a tmux `display-menu`) opened with `prefix + C-a`, so they never overwrite your global prefix keys — tmux's built-in `find-window` (`f`) and `previous-window` (`p`) stay exactly where they are. In the menu, press `f` filter, `p` pick, `c` clear — or use the arrow keys / mouse; any other key (or Escape) closes it. A menu is a client overlay, so its keys are consumed by the menu and never leak into a mirror tile.
 
+## Upgrading
+
+Already installed? Pull the new version the same way you installed it.
+
+- **TPM.** `prefix + U` (TPM's update) fetches the latest revision; `overview.tmux` re-registers the keybindings — including the `prefix + C-a` menu — on the next reload. Nothing else to do. If a dashboard is open, run `overview.sh kill` once (or `prefix + a` to leave and reopen) so the next open uses the new script.
+- **Bundled installer.** Re-run `./install.sh` from an updated clone; it overwrites `overview.sh` in place. The installer also **re-prints the keybinding snippet** — compare it against your `~/.tmux.conf` and add anything new (e.g. the `bind-key C-a display-menu …` block if you're coming from a version without it), then `tmux source-file ~/.tmux.conf`.
+- **Manual install.** Copy the new `overview.sh` over your old one (same path as before, e.g. `~/.local/bin/overview.sh`) and update the pasted keybinding block in `~/.tmux.conf` to match the current [Keybindings](#keybindings) snippet, then reload.
+
+The bindings you paste into `~/.tmux.conf` are a **snapshot** — only TPM re-syncs them automatically, so manual/installer users should re-check the snippet after any release that changes keys (like the move to the `C-a` menu). See [CHANGELOG.md](./CHANGELOG.md) for what changed between versions.
+
 ## Keybindings
 
 For manual installs, add this to `~/.tmux.conf` (adjust the path to where you put the script):
@@ -198,6 +208,8 @@ overview.sh unfilter           # back to showing every session
 bind-key A run-shell "$HOME/.local/bin/overview.sh build '^agent-'"
 ```
 
+> **Prompt caveat.** What you type at the **Filter** prompt is substituted into a shell command by tmux *before* the script sees it, so a pattern containing a literal `'`, `"`, or `#{…}`/`#(…)` may not reach the matcher intact (it's your own input, so this is a nuisance, not a security hole). Stick to plain ERE at the prompt, or use **Pick** for awkward names; `overview.sh filter '<regex>'` from the CLI has no such caveat.
+
 **Pick mode.** When you'd rather check off sessions by name than write a regex, `prefix + C-a` then **Pick sessions** (`p`) opens a `display-menu` checkbox over the live session list — each item toggles that session and reopens the menu. Under the hood, the selected names are compiled into an anchored ERE alternation (`^(name1|name2)$`) and applied through the same `@overview_filter` path as regex mode, so both share one code path with no special-casing in the hook-driven reconcile logic.
 
 ```sh
@@ -207,11 +219,11 @@ overview.sh pick                # print the current picks
 overview.sh unpick              # clear the pick set (alias for unfilter)
 ```
 
-A session killed while picked drops out of the grid immediately (like regex mode), but its name stays in `@overview_pick` — if a same-named session reappears, it's automatically picked again. Session names containing metacharacters (`( ) [ ] . * + ? ^ $ | \`) are escaped automatically, so `pick` always matches by exact name regardless of regex syntax.
+A session killed while picked drops out of the grid immediately (like regex mode) — unless it was the *only* remaining tile, which stays as a **DEAD** tile, because a tmux window must keep at least one pane. Its name stays in `@overview_pick` — if a same-named session reappears, it's automatically picked again. Session names containing metacharacters (`( ) [ ] . * + ? ^ $ | \`) are escaped automatically, so `pick` always matches by exact name regardless of regex syntax.
 
 ## How it works
 
-- **Mirroring.** Each tile runs `overview.sh mirror <session>`: a loop that captures the target session's active pane with `tmux capture-pane -ep` (`-e` preserves ANSI colors/attributes), takes the bottom `rows` lines (the status label lives on the border, so the whole pane body is content), hard-truncates each to the tile width with an ANSI-aware `awk` pass (SGR color sequences are copied uncounted, UTF-8 multibyte glyphs count as one, a reset is appended on cut), and repaints the tile using cursor-home + per-line erase escapes (`ESC[H`, `ESC[K`, `ESC[J`) — no full clears, so no flicker. Capturing is a pure read: the target session is never attached, resized, or sent input.
+- **Mirroring.** Each tile runs `overview.sh mirror <session>`: a loop that captures the target session's active pane with `tmux capture-pane -ep` (`-e` preserves ANSI colors/attributes), takes the bottom `rows` lines (the status label lives on the border, so the whole pane body is content), hard-truncates each to the tile width with an ANSI- and width-aware `awk` pass (SGR color sequences are copied uncounted, UTF-8 glyphs count by display width — wide CJK/emoji as two columns via an approximate `wcwidth`, combining/zero-width marks not special-cased — and a reset is appended on cut), and repaints the tile using cursor-home + per-line erase escapes (`ESC[H`, `ESC[K`, `ESC[J`) — no full clears, so no flicker. Capturing is a pure read: the target session is never attached, resized, or sent input.
 - **State detection.** The mirror loop compares `#{window_activity}` (last output, epoch seconds) against now — within `OVERVIEW_IDLE_SEC` → RUN, beyond it → IDLE with the idle duration — and writes the result into pane-local options (`@ov_state`, `@ov_idle`, `@ov_cmd`) only when it changes. The tile's top border, set via `pane-border-format`, renders those into a colored RUN/IDLE/DEAD label beside the session name and `#{pane_current_command}`; because tmux redraws the border itself, the color updates with state without the per-second in-pane repaint that used to flicker. If the target session vanishes, the border turns red **DEAD** and the pane shows a `session ended` banner until reconcile removes it.
 - **Grid reconciliation.** `build` registers two global hooks, `session-created[99]` and `session-closed[99]`, that call `overview.sh reconcile`. Reconcile diffs the live session list (through `@overview_filter`) against the grid — each tile carries its target in a `@mirror_target` pane option — then adds missing tiles, kills stale ones, and re-applies the `tiled` layout. The high hook index keeps your own `session-created`/`session-closed` hooks untouched, and if the dashboard session no longer exists, reconcile unregisters the hooks (self-healing).
 - **Zoom.** Reads the focused pane's `@mirror_target` and runs `switch-client -t <target>`. Because it's the same terminal client switching sessions (not a nested attach), the target keeps its size — no reflow damage to running TUIs. The empirical study behind this design is in [docs/DESIGN.md](./docs/DESIGN.md).

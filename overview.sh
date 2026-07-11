@@ -1,6 +1,7 @@
 #!/bin/sh
 # overview.sh — read-only live tiled dashboard for all tmux sessions
-# Verified on: tmux 3.6, macOS, /bin/sh (POSIX). Requires tmux 3.0+.
+# Verified on: tmux 3.6, macOS, /bin/sh (POSIX). Requires tmux >= 3.2 (the
+# newest feature used, display-menu, is 3.0+; 3.2 is the tested floor).
 #
 # usage:
 #   overview.sh build [pattern]    # (re)create the dashboard session
@@ -37,6 +38,39 @@ INTERVAL="${OVERVIEW_INTERVAL:-1}"
 SELF_PATH=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
 [ -f "$SELF_PATH" ] || SELF_PATH="$0"
 
+# --- quoting helpers -------------------------------------------------------
+# Session names come from `list-sessions` and are user/branch-controlled: they
+# may hold spaces, quotes, '#', '$', etc. Each gets interpolated into a command
+# string that passes one or two parser layers before /bin/sh runs it, so an
+# unescaped name like `it's` breaks every tile spawn (and, crafted, could inject
+# commands). These helpers make interpolation safe.
+
+# sq <s> : echo $s as a single-quoted, /bin/sh-safe token ('' -> '\'').
+# Enough wherever the value reaches sh through exactly ONE layer -- e.g. the
+# command operand of split-window / new-session, which tmux runs verbatim via
+# `sh -c` and does NOT format-expand (verified).
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# rsq <s> : like sq(), but also safe to embed inside a tmux `run-shell "..."`
+# argument, which tmux runs through its command lexer AND format expansion before
+# handing the result to sh. tmux un-escapes in the order lexer(\, ") -> format(#)
+# -> then sh word-splits ('), so we escape sh-quote first, then \, ", #, $. Note
+# '$' IS expanded by tmux here (unlike the split-window operand), so neutralise
+# it too. Verified end-to-end against tmux for ' " # $ space and #(...)/$(...).
+rsq() {
+  printf '%s' "$(sq "$1")" \
+    | sed 's/\\/\\\\/g' \
+    | sed 's/"/\\"/g' \
+    | sed 's/#/##/g' \
+    | sed 's/\$/\\$/g'
+}
+
+# fmt_lit <s> : double '#' so a tmux format parser (display-message, run-shell,
+# pane-border-format) treats the text as a literal instead of running
+# #{...}/#(...)/#h. Used for user-supplied text echoed back to the status line.
+fmt_lit() { printf '%s' "$1" | sed 's/#/##/g'; }
+# ---------------------------------------------------------------------------
+
 # Per-tile status shown on the pane's top border. tmux redraws the border
 # itself, so the colour never flickers the way a per-second in-pane repaint did.
 # The mirror loop writes these pane-local user options only when they change:
@@ -51,30 +85,46 @@ dash_win() { tmux list-windows -t "=$DASH" -F '#{window_id}' 2>/dev/null | head 
 # The command a tile runs: env is baked in because tiles spawn in the tmux
 # server's environment, not the caller's.
 tile_cmd() {
-  printf "OVERVIEW_IDLE_SEC=%s OVERVIEW_INTERVAL=%s sh '%s' mirror '%s'" \
-    "$IDLE_SEC" "$INTERVAL" "$SELF_PATH" "$1"
+  printf 'OVERVIEW_IDLE_SEC=%s OVERVIEW_INTERVAL=%s sh %s mirror %s' \
+    "$IDLE_SEC" "$INTERVAL" "$(sq "$SELF_PATH")" "$(sq "$1")"
 }
 
-# Hard-truncate each stdin line to $1 visible columns, ANSI-aware: SGR color
-# sequences are copied without counting, UTF-8 multibyte glyphs count as one, and
-# a reset is appended when a line is cut. Keeps a wide source TUI from wrapping
-# into a broken mess inside a narrower tile. Also appends clear-to-EOL per line.
+# Hard-truncate each stdin line to $1 visible columns, ANSI- and width-aware:
+# SGR/escape sequences are copied without counting, UTF-8 glyphs count by display
+# width (East Asian Wide/Fullwidth and common emoji = 2 columns, via approximate
+# wcwidth below; everything else = 1), and a reset is appended when a line is cut.
+# Keeps a wide source TUI or a CJK-heavy pane from wrapping into a broken mess
+# inside a narrower tile. Also appends clear-to-EOL per line.
 clip_to_width() {
-  LC_ALL=C awk -v w="$1" '
+  LC_ALL=C awk -v wmax="$1" '
+    # wide(cp): 1 if the codepoint occupies 2 terminal columns. Decimal literals
+    # only -- POSIX awk (incl. macOS nawk) does not parse 0x.. hex constants, so
+    # hex ranges would silently all read as 0 and every glyph would count as 1.
+    function wide(cp) {
+      return (cp>=4352  && cp<=4447)  ||                         # Hangul Jamo
+             (cp>=11904 && cp<=12350) || (cp>=12353 && cp<=13311) ||
+             (cp>=13312 && cp<=19903) || (cp>=19968 && cp<=40959) ||  # CJK
+             (cp>=40960 && cp<=42191) || (cp>=44032 && cp<=55203) ||  # Hangul
+             (cp>=63744 && cp<=64255) || (cp>=65072 && cp<=65103) ||
+             (cp>=65280 && cp<=65376) || (cp>=65504 && cp<=65510) ||  # Fullwidth
+             (cp>=127744 && cp<=129791) || (cp>=131072 && cp<=262141) # emoji, CJK ext
+    }
     BEGIN { esc=sprintf("%c",27); for (k=0;k<256;k++) ord[sprintf("%c",k)]=k }
     { n=length($0); i=1; vis=0; out=""; trunc=0
       while (i<=n) {
-        c=substr($0,i,1)
+        c=substr($0,i,1); b=ord[c]
         if (c==esc) {                       # copy a full escape sequence, uncounted
           seq=c; i++
           if (substr($0,i,1)=="[") { seq=seq"["; i++
             while (i<=n) { ch=substr($0,i,1); seq=seq ch; i++; if (ch ~ /[@-~]/) break } }
           out=out seq; continue
         }
-        b=ord[c]
-        if (b>=128 && b<192) { out=out c; i++; continue }   # UTF-8 continuation byte
-        if (vis>=w) { trunc=1; break }
-        out=out c; vis++; i++
+        if (b<128) { L=1 } else if (b<224) { L=2 } else if (b<240) { L=3 } else { L=4 }
+        cp = (L==1) ? b : (b<224 ? b%32 : (b<240 ? b%16 : b%8))
+        for (j=1;j<L;j++) cp = cp*64 + (ord[substr($0,i+j,1)]%64)
+        w = (L>=3 && wide(cp)) ? 2 : 1      # only 3+ byte seqs reach wide ranges
+        if (vis+w > wmax) { trunc=1; break }
+        out=out substr($0,i,L); vis+=w; i+=L
       }
       if (trunc) out=out esc"[0m"
       print out esc"[K"
@@ -121,8 +171,13 @@ mirror() {
       tmux set -p -t "$me" @ov_cmd   "$cmd" 2>/dev/null
       last="$sig"
     fi
+    # Capture into a var first: command substitution strips trailing blank rows,
+    # so `tail -n rows` keeps the CONTENT rows even when the source pane is taller
+    # than this tile. (A fresh session has its prompt at the top; piping capture
+    # straight into tail would keep only the bottom blank rows -> an empty tile.)
+    body=$(tmux capture-pane -ep -t "=$t:" 2>/dev/null)
     printf '%s[H' "$esc"
-    tmux capture-pane -ep -t "=$t:" 2>/dev/null | tail -n "$rows" | clip_to_width "$cols"
+    printf '%s\n' "$body" | tail -n "$rows" | clip_to_width "$cols"
     printf '%s[J' "$esc"
     sleep "$INTERVAL"
   done
@@ -133,13 +188,25 @@ HOOK_IDX=99   # global hook slot for auto-refresh (high index avoids clobbering 
 set_hooks() {
   # Bake OVERVIEW_SESSION into the hook so reconcile targets the right dashboard
   # (hooks run in the server env and would otherwise fall back to the default name).
-  _h="run-shell \"OVERVIEW_SESSION='$DASH' $SELF_PATH reconcile\""
+  _h="run-shell \"OVERVIEW_SESSION=$(rsq "$DASH") sh $(rsq "$SELF_PATH") reconcile\""
   tmux set-hook -g "session-created[$HOOK_IDX]" "$_h"
   tmux set-hook -g "session-closed[$HOOK_IDX]"  "$_h"
 }
 unset_hooks() {
   tmux set-hook -gu "session-created[$HOOK_IDX]" 2>/dev/null
   tmux set-hook -gu "session-closed[$HOOK_IDX]"  2>/dev/null
+}
+
+# Move any client currently viewing the dashboard onto another session, so a
+# following kill-session (default detach-on-destroy) doesn't drop the user out
+# of tmux. No-op if the dashboard, or any alternate session, is absent.
+detach_clients_from_dash() {
+  tmux has-session -t "=$DASH" 2>/dev/null || return 0
+  alt=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH" | head -n1)
+  [ -n "$alt" ] || return 0
+  tmux list-clients -t "$DASH" -F '#{client_name}' 2>/dev/null | while IFS= read -r c; do
+    [ -n "$c" ] && tmux switch-client -c "$c" -t "$alt" 2>/dev/null
+  done
 }
 
 # Add one mirror tile for session $2 into window $1. Returns 1 if the split fails.
@@ -151,7 +218,11 @@ add_tile() {
 }
 
 # Sessions to mirror: everything except the dashboard, matching the optional
-# filter (POSIX ERE via `grep -E`; see valid_regex()/filter_cmd() below).
+# filter. The matcher is `grep -E` (POSIX Extended RE) -- changed from plain grep
+# (Basic RE) when filter/pick landed. The common subset (^ $ . [ ] * and
+# literals) is unchanged; only BRE's backslashed metacharacters (\| \( \{) shift
+# meaning. See docs/DESIGN.md §4.6 and CHANGELOG.md. valid_regex()/filter_cmd()
+# below build on this.
 targets_for() {
   tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH" | grep -E -e "${1:-.}"
 }
@@ -168,7 +239,7 @@ valid_regex() {
 # msg <text...> : surface a short message on the status line when running
 # inside tmux (e.g. from a keybinding's run-shell) and always on stderr too.
 msg() {
-  tmux display-message "overview: $*" 2>/dev/null
+  tmux display-message "overview: $(fmt_lit "$*")" 2>/dev/null
   echo "overview: $*" >&2
 }
 
@@ -189,12 +260,17 @@ show_filter() {
 # dashboard (see docs/DESIGN.md). Entering regex mode always discards any
 # active pick selection (the two modes are mutually exclusive).
 filter_cmd() {
-  pat="${1:-.}"; [ -z "$1" ] && pat='.'
+  pat="${1:-.}"
   valid_regex "$pat" || { msg "invalid regex: $1"; exit 1; }
   if ! tmux has-session -t "=$DASH" 2>/dev/null; then
     build "$pat"; return
   fi
-  [ -n "$(targets_for "$pat")" ] || { msg "no sessions match '$1' (filter unchanged)"; exit 1; }
+  # Reject a filter that matches nothing so a typo can't blank the dashboard --
+  # but never for the clear/unfilter case (pat='.'), which must succeed even when
+  # the dashboard is the only session left.
+  if [ "$pat" != '.' ] && [ -z "$(targets_for "$pat")" ]; then
+    msg "no sessions match '$1' (filter unchanged)"; exit 1
+  fi
   tmux set -t "$DASH" @overview_pick ''        # regex mode wins: discard any pick selection
   tmux set -t "$DASH" @overview_filter "$pat"
   set_hooks
@@ -265,6 +341,11 @@ pick_toggle() {
   fi
   picks=$(printf '%s\n' "$picks" | grep -v '^$')
   apply_pick "$picks"
+  # Picking a not-yet-existing name is allowed (it re-picks when the session
+  # reappears), so don't reject -- but warn when the current selection matches
+  # no live session, so a CLI typo isn't a silent empty grid.
+  [ -n "$picks" ] && [ -z "$(targets_for "$(printf '%s\n' "$picks" | compile_pick)")" ] &&
+    msg "picks match no live session"
 }
 
 # show_picks : print the current pick selection (one name per line), or
@@ -295,17 +376,17 @@ pickmenu() {
   tmux has-session -t "=$DASH" 2>/dev/null || { msg "no dashboard"; exit 1; }
   picks=$(tmux show -t "$DASH" -v @overview_pick 2>/dev/null)
   sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH")
-  set -- -T ' overview: pick sessions '
+  set -- -T '#[align=centre] overview: pick '
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     mark='  '
     printf '%s\n' "$picks" | grep -qFx "$s" && mark='✓ '
-    cmd="run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' pick '$s'\" ; run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' pickmenu\""
-    set -- "$@" "$mark$s" '' "$cmd"
+    cmd="run-shell \"OVERVIEW_SESSION=$(rsq "$DASH") sh $(rsq "$SELF_PATH") pick $(rsq "$s")\" ; run-shell \"OVERVIEW_SESSION=$(rsq "$DASH") sh $(rsq "$SELF_PATH") pickmenu\""
+    set -- "$@" "$mark$(fmt_lit "$s")" '' "$cmd"
   done <<EOF
 $sessions
 EOF
-  set -- "$@" '' 'clear all (unpick)' '' "run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' unpick\""
+  set -- "$@" '' 'clear all (unpick)' '' "run-shell \"OVERVIEW_SESSION=$(rsq "$DASH") sh $(rsq "$SELF_PATH") unpick\""
   if [ -n "${OVERVIEW_PICKMENU_DRYRUN:-}" ]; then
     for a in "$@"; do printf '%s\n' "$a"; done
     return 0
@@ -325,10 +406,13 @@ reconcile() {
   # add tiles for sessions not shown yet (line-based: allows spaces in names)
   printf '%s\n' "$desired" | while IFS= read -r s; do
     [ -n "$s" ] || continue
-    printf '%s\n' "$shown" | grep -qFx "$s" || add_tile "$win" "$s"
+    printf '%s\n' "$shown" | grep -qFx "$s" || add_tile "$win" "$s" ||
+      echo "overview: reconcile could not add tile for '$s'" >&2
   done
-  # drop tiles whose target session no longer exists
-  tmux list-panes -t "$win" -F '#{pane_id} #{@mirror_target}' 2>/dev/null | while IFS=' ' read -r pid tgt; do
+  # drop tiles whose target session no longer exists (tab-delimited so that a
+  # trailing space in a session name survives `read` and the name still matches)
+  tab=$(printf '\t')
+  tmux list-panes -t "$win" -F "#{pane_id}${tab}#{@mirror_target}" 2>/dev/null | while IFS="$tab" read -r pid tgt; do
     [ -n "$tgt" ] || continue
     printf '%s\n' "$desired" | grep -qFx "$tgt" || tmux kill-pane -t "$pid" 2>/dev/null
   done
@@ -336,7 +420,6 @@ reconcile() {
 }
 
 build() {
-  unset_hooks                                # avoid reconcile races while (re)building
   filter="${1:-.}"
   valid_regex "$filter" || { msg "invalid regex: $1"; exit 1; }
   targets=$(targets_for "$filter")
@@ -346,19 +429,16 @@ build() {
     self=$(tmux display -p '#{session_name}' 2>/dev/null)
     [ -n "$self" ] && targets=$(printf '%s\n' "$targets" | grep -vFx "$self")
   fi
-  [ -z "$targets" ] && { echo "no target sessions"; exit 1; }
+  [ -z "$targets" ] && { echo "no target sessions" >&2; exit 1; }
 
-  # If a client is already viewing an existing dashboard, move it to another
-  # session first so kill-session (detach-on-destroy) doesn't kick it out of tmux.
-  if tmux has-session -t "=$DASH" 2>/dev/null; then
-    alt=$(tmux list-sessions -F '#{session_name}' | grep -vFx "$DASH" | head -n1)
-    if [ -n "$alt" ]; then
-      tmux list-clients -t "$DASH" -F '#{client_name}' 2>/dev/null | while IFS= read -r c; do
-        [ -n "$c" ] && tmux switch-client -c "$c" -t "$alt" 2>/dev/null
-      done
-    fi
-    tmux kill-session -t "=$DASH" 2>/dev/null
-  fi
+  # Validation passed -- only now is it safe to touch hooks or tear down the old
+  # grid. unset_hooks MUST stay below the guards above: a rejected rebuild (bad
+  # regex / zero matches) exiting earlier must not strip auto-refresh from a live
+  # dashboard. detach_clients_from_dash keeps an attached client inside tmux when
+  # the following kill-session (detach-on-destroy) replaces the grid in place.
+  unset_hooks
+  detach_clients_from_dash
+  tmux kill-session -t "=$DASH" 2>/dev/null
 
   win=""
   while IFS= read -r t; do
@@ -370,13 +450,13 @@ build() {
       tmux set -p -t "$p" @ov_state RUN
       tmux select-pane -t "$p" -T "$t"
     else
-      add_tile "$win" "$t" || echo "warn: could not add tile for '$t' (grid full?)" >&2
+      add_tile "$win" "$t" || echo "overview: could not add tile for '$t'" >&2
       tmux select-layout -t "$win" tiled
     fi
   done <<EOF
 $targets
 EOF
-  [ -n "$win" ] || { echo "no target sessions"; exit 1; }
+  [ -n "$win" ] || { echo "overview: could not create dashboard session '$DASH'" >&2; exit 1; }
 
   tmux set -w -t "$win" pane-border-status top
   tmux set -w -t "$win" pane-border-format "$BORDER_FMT"
@@ -424,7 +504,7 @@ case "$1" in
     fi
     ;;
   reconcile) reconcile ;;
-  kill)      unset_hooks; tmux kill-session -t "=$DASH" 2>/dev/null ;;
+  kill)      unset_hooks; detach_clients_from_dash; tmux kill-session -t "=$DASH" 2>/dev/null ;;
   filter)
     if [ $# -ge 2 ]; then filter_cmd "$2"; else show_filter; fi
     ;;
