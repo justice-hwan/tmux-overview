@@ -27,6 +27,11 @@ release versions yet, so entries are grouped by change set, newest first.
   user filter or a session name run through tmux format expansion (`fmt_lit`).
 - **`kill`** now moves any attached client off the dashboard first, so it doesn't
   drop you out of tmux (matching what `build` already did).
+- A **`#` in a session name** (e.g. `feature#123`) now renders literally on the
+  tile border instead of being interpreted as a tmux format directive. Display
+  paths (pane title, `@ov_cmd`) escape `#`, and `@mirror_target` is read raw via
+  `show -v` so a name is never re-expanded on read (some tmux versions re-expand
+  a value referenced with `#{@opt}`).
 
 ### Added
 - **Double-width (CJK / emoji) awareness in tile truncation.** East Asian
@@ -36,9 +41,9 @@ release versions yet, so entries are grouped by change set, newest first.
   against a throwaway `tmux -L` server (adversarial names, filter validation,
   pick, injection, kill). Never touches your default tmux server.
 - All scripts are **`shellcheck`-clean** and syntax-checked (`sh -n` / `bash -n`).
-  A CI workflow that also runs the smoke test is provided in
-  `.github/workflows/ci.yml` (adding it to the repo needs a `workflow`-scoped
-  push).
+  A GitHub Actions CI workflow (`.github/workflows/ci.yml`) runs shellcheck,
+  syntax checks, and the smoke test on **Linux / tmux 3.4** — cross-version
+  coverage that already caught a Linux-only behavior the macOS/3.6 run missed.
 - An **Upgrading** section in the READMEs covering TPM / installer / manual.
 
 ### Changed
