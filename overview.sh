@@ -168,7 +168,7 @@ mirror() {
       # the border, so there is no per-second in-pane redraw to flicker.
       tmux set -p -t "$me" @ov_state "$st" 2>/dev/null
       tmux set -p -t "$me" @ov_idle  "$id"  2>/dev/null
-      tmux set -p -t "$me" @ov_cmd   "$cmd" 2>/dev/null
+      tmux set -p -t "$me" @ov_cmd   "$(fmt_lit "$cmd")" 2>/dev/null   # shown in border format
       last="$sig"
     fi
     # Capture into a var first: command substitution strips trailing blank rows,
@@ -212,9 +212,9 @@ detach_clients_from_dash() {
 # Add one mirror tile for session $2 into window $1. Returns 1 if the split fails.
 add_tile() {
   _p=$(tmux split-window -d -P -F '#{pane_id}' -t "$1" "$(tile_cmd "$2")" 2>/dev/null) || return 1
-  tmux set -p -t "$_p" @mirror_target "$2"
+  tmux set -p -t "$_p" @mirror_target "$2"      # RAW (matching key); never rendered as a format
   tmux set -p -t "$_p" @ov_state RUN            # seed so the border shows RUN, not "IDLE s", before the first mirror tick
-  tmux select-pane -t "$_p" -T "$2"
+  tmux select-pane -t "$_p" -T "$(fmt_lit "$2")"  # title IS rendered (#{pane_title} in the border) -> escape '#'
 }
 
 # Sessions to mirror: everything except the dashboard, matching the optional
@@ -402,17 +402,22 @@ reconcile() {
   filter=$(tmux show -t "$DASH" -v @overview_filter 2>/dev/null); [ -z "$filter" ] && filter='.'
   desired=$(targets_for "$filter")
   [ -z "$desired" ] && return 0   # nothing to show; keep existing tile(s) instead of self-destructing
-  shown=$(tmux list-panes -t "$win" -F '#{@mirror_target}' 2>/dev/null)
+  # Existing tiles' target names, read RAW via `show -v` -- never as a #{@opt}
+  # format. Some tmux versions re-expand a user-option value referenced with
+  # #{@mirror_target}, which would run #(...) embedded in a session name. Reading
+  # per pane also preserves a trailing space that a -F read + word-split drops.
+  shown=$(tmux list-panes -t "$win" -F '#{pane_id}' 2>/dev/null | while IFS= read -r pid; do
+    tmux show -p -t "$pid" -v @mirror_target 2>/dev/null
+  done)
   # add tiles for sessions not shown yet (line-based: allows spaces in names)
   printf '%s\n' "$desired" | while IFS= read -r s; do
     [ -n "$s" ] || continue
     printf '%s\n' "$shown" | grep -qFx "$s" || add_tile "$win" "$s" ||
       echo "overview: reconcile could not add tile for '$s'" >&2
   done
-  # drop tiles whose target session no longer exists (tab-delimited so that a
-  # trailing space in a session name survives `read` and the name still matches)
-  tab=$(printf '\t')
-  tmux list-panes -t "$win" -F "#{pane_id}${tab}#{@mirror_target}" 2>/dev/null | while IFS="$tab" read -r pid tgt; do
+  # drop tiles whose target session no longer exists (raw per-pane read, same reason)
+  tmux list-panes -t "$win" -F '#{pane_id}' 2>/dev/null | while IFS= read -r pid; do
+    tgt=$(tmux show -p -t "$pid" -v @mirror_target 2>/dev/null)
     [ -n "$tgt" ] || continue
     printf '%s\n' "$desired" | grep -qFx "$tgt" || tmux kill-pane -t "$pid" 2>/dev/null
   done
@@ -448,7 +453,7 @@ build() {
       p=$(tmux list-panes -t "$win" -F '#{pane_id}' | head -n1)
       tmux set -p -t "$p" @mirror_target "$t"
       tmux set -p -t "$p" @ov_state RUN
-      tmux select-pane -t "$p" -T "$t"
+      tmux select-pane -t "$p" -T "$(fmt_lit "$t")"
     else
       add_tile "$win" "$t" || echo "overview: could not add tile for '$t'" >&2
       tmux select-layout -t "$win" tiled
@@ -477,7 +482,7 @@ EOF
 
 # Switch the current client into the session under the focused tile.
 enter_tile() {
-  target=$(tmux display -p '#{@mirror_target}' 2>/dev/null)
+  target=$(tmux show -p -v @mirror_target 2>/dev/null)   # raw read: never format-expand a name
   [ -n "$target" ] && tmux has-session -t "=$target" 2>/dev/null && tmux switch-client -t "$target"
 }
 

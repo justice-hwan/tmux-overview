@@ -102,6 +102,8 @@ after=$(tm show -t "$DASH" -v @overview_filter 2>/dev/null)
 ov unfilter >/dev/null 2>&1
 n=$(tm list-panes -t "$win" -F x 2>/dev/null | grep -c .)
 [ "$n" = "$sessN" ] && ok "unfilter restores all $sessN tiles" || no "unfilter -> $n tiles (want $sessN)"
+# reconcile re-read the (adversarial) names above; make sure that didn't fire #()
+[ -e "$PWNED" ] && { no "INJECTION during filter/reconcile"; rm -f "$PWNED"; } || ok "no injection during filter/reconcile"
 
 echo "== pickmenu dry-run is injection-safe =="
 out=$(OVERVIEW_PICKMENU_DRYRUN=1 ov pickmenu 2>/dev/null)
