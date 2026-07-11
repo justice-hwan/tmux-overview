@@ -48,30 +48,6 @@ ov()   { sh "$OV" "$@"; }             # the real script, tmux-shimmed via PATH
 cleanup() { "$REAL_TMUX" -L "$SOCK" kill-server 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
-# ===== TEMP DIAGNOSTIC (pinpoint the #() injection vector on this tmux) =====
-echo "== DIAG on $("$REAL_TMUX" -V) =="
-dp="$WORK/diag"; mkdir -p "$dp"
-dpid=$(tm new-session -d -s diag -x 80 -y 30 -P -F '#{pane_id}' 'sleep 300')
-echo "  diag pane=[$dpid]"
-tm set -w -t "$dpid" pane-border-status top
-tprobe() { rm -f "$2"; tm select-pane -t "$dpid" -T "$1"; tm set -w -t "$dpid" pane-border-format '#{pane_title}'; tm refresh-client 2>/dev/null; sleep 0.3; echo "  title[$3]: exec=$([ -e "$2" ] && echo YES || echo no)"; }
-tprobe "a#(touch $dp/tr)b"    "$dp/tr" "raw"
-tprobe "a##(touch $dp/t2)b"   "$dp/t2" "##"
-tprobe "a####(touch $dp/t4)b" "$dp/t4" "####"
-tm kill-session -t "$dpid" 2>/dev/null
-# target-spec expansion: does `-t "=<name>:"` expand #() in the name? (this is
-# what the mirror loop does every tick with the RAW session name)
-zn="z#(touch $dp/tg)z"
-rm -f "$dp/tg"; tm new-session -d -s "$zn" -x 80 -y 24 'sleep 300' 2>/dev/null
-echo "  new-session -s <#()name>: exec=$([ -e "$dp/tg" ] && echo YES || echo no)"
-rm -f "$dp/tg"; tm display -p -t "=$zn:" '#{pane_id}' >/dev/null 2>&1; sleep 0.2
-echo "  display -t =<#()name>:   exec=$([ -e "$dp/tg" ] && echo YES || echo no)"
-rm -f "$dp/tg"; tm capture-pane -p -t "=$zn:" >/dev/null 2>&1; sleep 0.2
-echo "  capture -t =<#()name>:   exec=$([ -e "$dp/tg" ] && echo YES || echo no)"
-tm kill-session -t "=$zn" 2>/dev/null
-echo "== END DIAG =="
-# ===== END TEMP DIAGNOSTIC =====
-
 # ---- fixtures: adversarial session names -----------------------------------
 tm new-session -d -s "$DASH-holder" -x 200 -y 50   # a client-less holder so the server is up
 # `web` is a TALL pane with a marker printed at the very top. A shorter tile that
@@ -86,6 +62,13 @@ for s in "api" "it's" "a b" 'x#(touch '"$PWNED"')y'; do
 done
 tm kill-session -t "=$DASH-holder" 2>/dev/null
 sleep 0.3
+# On tmux versions that format-expand a session NAME at creation (e.g. 3.4), the
+# `x#(...)y` fixture's own `new-session -s` runs the #() itself -- that's tmux, not
+# overview.sh, which never creates a session from a mirrored name (and such a name
+# can't even exist there: tmux expands it away). Clear any marker from fixture
+# setup now, so the checks below measure OVERVIEW.SH's handling only. On 3.6+ the
+# name stays literal and nothing ran, so this is a harmless no-op.
+rm -f "$PWNED"
 
 echo "== build with adversarial names =="
 ov build >/dev/null 2>&1
