@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  lint:
+    name: shellcheck + syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck (POSIX sh)
+        run: shellcheck -s sh overview.sh install.sh tests/smoke.sh
+      - name: shellcheck (bash)
+        run: shellcheck -s bash overview.tmux
+      - name: syntax check
+        run: |
+          for f in overview.sh install.sh tests/smoke.sh; do sh -n "$f"; done
+          bash -n overview.tmux
+
+  smoke:
+    name: smoke (tmux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: tmux version
+        run: tmux -V
+      - name: smoke test
+        run: sh tests/smoke.sh
