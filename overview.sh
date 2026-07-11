@@ -4,12 +4,17 @@
 #
 # usage:
 #   overview.sh build [pattern]    # (re)create the dashboard session
-#                                  #   pattern: grep pattern for session names (default: all)
+#                                  #   pattern: ERE (grep -E) for session names (default: all)
 #   overview.sh toggle             # outside dashboard: open it / inside: enter focused tile
 #   overview.sh rebuild            # force a full re-sync of the grid
 #   overview.sh zoom               # (keybinding inside dashboard) enter focused tile's session
 #   overview.sh reconcile          # sync grid with live session list (fired by hooks)
 #   overview.sh kill               # remove the dashboard session and its hooks
+#   overview.sh filter [regex]     # set/apply-in-place the live ERE filter (no arg: show current)
+#   overview.sh unfilter           # clear the filter (regex or pick) and show every session
+#   overview.sh pick [session]     # toggle a session in the checkbox pick set (no arg: show picks)
+#   overview.sh unpick             # alias for unfilter
+#   overview.sh pickmenu           # open a display-menu checkbox UI over live sessions
 #   overview.sh mirror <sess>      # internal: mirror loop running inside one tile
 #
 # Env: OVERVIEW_SESSION (name, default "overview"), OVERVIEW_WIDTH/HEIGHT,
@@ -85,6 +90,13 @@ mirror() {
   [ -n "$me" ] || me=$(tmux display -p '#{pane_id}' 2>/dev/null)
   last=""
   while :; do
+    # Self-heal: if a stray mouse action (or a leftover mode from a previous occupant
+    # of this pane) stranded this tile in copy-mode, tmux would pause the live repaint
+    # below and the tile would eat f/p/c as copy-mode motions. Kick it back to normal
+    # every tick so the mirror stays live and never hijacks the overview control keys.
+    case "$(tmux display -p -t "$me" '#{pane_in_mode}' 2>/dev/null)" in
+      1) tmux copy-mode -q -t "$me" 2>/dev/null ;;
+    esac
     rows=$(tmux display -p -t "$me" '#{pane_height}' 2>/dev/null) || exit 0
     cols=$(tmux display -p -t "$me" '#{pane_width}' 2>/dev/null)
     a=$(tmux display -p -t "=$t:" '#{window_activity}' 2>/dev/null)
@@ -138,9 +150,167 @@ add_tile() {
   tmux select-pane -t "$_p" -T "$2"
 }
 
-# Sessions to mirror: everything except the dashboard, matching the optional filter.
+# Sessions to mirror: everything except the dashboard, matching the optional
+# filter (POSIX ERE via `grep -E`; see valid_regex()/filter_cmd() below).
 targets_for() {
-  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH" | grep -e "${1:-.}"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH" | grep -E -e "${1:-.}"
+}
+
+# valid_regex <pattern> : true if $1 is a syntactically valid ERE. Probed
+# against an empty line so it's only ever a syntax check: grep's exit status
+# is 0 (matched) or 1 (no match) for any valid pattern, and >1 for a syntax
+# error, regardless of whether the empty line happens to match.
+valid_regex() {
+  printf '\n' | grep -E -e "$1" >/dev/null 2>&1
+  [ $? -le 1 ]
+}
+
+# msg <text...> : surface a short message on the status line when running
+# inside tmux (e.g. from a keybinding's run-shell) and always on stderr too.
+msg() {
+  tmux display-message "overview: $*" 2>/dev/null
+  echo "overview: $*" >&2
+}
+
+# show_filter : print the currently active regex-mode filter.
+show_filter() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { echo "no dashboard"; exit 1; }
+  f=$(tmux show -t "$DASH" -v @overview_filter 2>/dev/null)
+  case "$f" in
+    ''|.) echo "overview: filter (none - showing all)" ;;
+    *)    echo "overview: filter '$f'" ;;
+  esac
+}
+
+# filter_cmd <pattern> : validate an ERE, store it in @overview_filter, and
+# reconcile in place. '' is normalized to '.' (= show everything / unfilter).
+# Rejects (leaving the existing filter untouched) on invalid ERE syntax or on
+# a pattern that currently matches zero sessions, so a typo can't blank the
+# dashboard (see docs/DESIGN.md). Entering regex mode always discards any
+# active pick selection (the two modes are mutually exclusive).
+filter_cmd() {
+  pat="${1:-.}"; [ -z "$1" ] && pat='.'
+  valid_regex "$pat" || { msg "invalid regex: $1"; exit 1; }
+  if ! tmux has-session -t "=$DASH" 2>/dev/null; then
+    build "$pat"; return
+  fi
+  [ -n "$(targets_for "$pat")" ] || { msg "no sessions match '$1' (filter unchanged)"; exit 1; }
+  tmux set -t "$DASH" @overview_pick ''        # regex mode wins: discard any pick selection
+  tmux set -t "$DASH" @overview_filter "$pat"
+  set_hooks
+  reconcile
+  tmux has-session -t "=$DASH" 2>/dev/null || build "$pat"   # extreme-case safety net
+  if [ "$pat" = '.' ]; then msg "filter cleared"; else msg "filter: $pat"; fi
+}
+
+# unfilter : clear the filter (regex or pick, whichever is active) and show
+# every session again. No-op (not an error) when there is no dashboard yet.
+unfilter() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { msg "no dashboard"; return 0; }
+  filter_cmd '.'
+}
+
+# ere_escape <name> : make a session name safe to use as a literal inside an
+# ERE alternation (escape ERE metacharacters). LC_ALL=C keeps sed byte-safe
+# regardless of locale, so this also works for multibyte session names.
+ere_escape() {
+  printf '%s' "$1" | LC_ALL=C sed 's/[][(){}.^$*+?|\\]/\\&/g'
+}
+
+# compile_pick : stdin = newline-separated session names, stdout = an
+# anchored ERE alternation matching exactly that set, e.g. ^(a|b|c)$. Empty
+# (or all-blank) input yields empty output — callers treat that as "no
+# selection", which is equivalent to unfilter (see apply_pick()).
+compile_pick() {
+  alt=''
+  while IFS= read -r nm; do
+    [ -n "$nm" ] || continue
+    e=$(ere_escape "$nm")
+    alt="${alt:+$alt|}$e"
+  done
+  [ -n "$alt" ] && printf '^(%s)$' "$alt"
+}
+
+# apply_pick <names> : $1 = newline-separated session names (may be empty).
+# Persists the raw set to @overview_pick, compiles it into @overview_filter,
+# and reconciles. An empty set falls back to unfilter (§ pick edge cases).
+apply_pick() {
+  tmux set -t "$DASH" @overview_pick "$1"
+  re=$(printf '%s\n' "$1" | compile_pick)
+  if [ -z "$re" ]; then
+    unfilter
+    return
+  fi
+  tmux set -t "$DASH" @overview_filter "$re"
+  set_hooks
+  reconcile
+  tmux has-session -t "=$DASH" 2>/dev/null || build "$re"
+}
+
+# pick_toggle <session> : toggle exact-name membership in the pick set, then
+# recompile+reconcile. If the dashboard doesn't exist yet, build one showing
+# just that session and seed the pick set so later toggles/pickmenu agree.
+pick_toggle() {
+  if ! tmux has-session -t "=$DASH" 2>/dev/null; then
+    e=$(ere_escape "$1")
+    build "^($e)\$"
+    tmux has-session -t "=$DASH" 2>/dev/null && tmux set -t "$DASH" @overview_pick "$1"
+    return
+  fi
+  picks=$(tmux show -t "$DASH" -v @overview_pick 2>/dev/null)
+  if printf '%s\n' "$picks" | grep -qFx "$1"; then
+    picks=$(printf '%s\n' "$picks" | grep -vFx "$1")
+  else
+    picks=$(printf '%s\n' "$picks"; printf '%s\n' "$1")
+  fi
+  picks=$(printf '%s\n' "$picks" | grep -v '^$')
+  apply_pick "$picks"
+}
+
+# show_picks : print the current pick selection (one name per line), or
+# "(none)" when nothing is picked.
+show_picks() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { echo "no dashboard"; exit 1; }
+  p=$(tmux show -t "$DASH" -v @overview_pick 2>/dev/null)
+  p=$(printf '%s\n' "$p" | grep -v '^$')
+  if [ -z "$p" ]; then
+    echo "overview: pick (none)"
+  else
+    echo "overview: pick"
+    printf '%s\n' "$p" | while IFS= read -r nm; do echo "  $nm"; done
+  fi
+}
+
+# pickmenu : open a display-menu checkbox UI over the live session list; each
+# item toggles that session's pick membership then reopens the menu (a fresh
+# invocation, since display-menu has no built-in checkbox/reopen primitive).
+# Args are accumulated with `set --` inside a `while ... done <<EOF` loop —
+# NOT a `| while` pipe — so the loop body runs in the *current* shell rather
+# than a subshell and the accumulation survives past the loop (same trick
+# build() already relies on above).
+# For automated testing (display-menu needs a real attached client, so it
+# can't be driven headlessly): set OVERVIEW_PICKMENU_DRYRUN=1 to print the
+# assembled `display-menu` arguments one per line instead of opening the menu.
+pickmenu() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { msg "no dashboard"; exit 1; }
+  picks=$(tmux show -t "$DASH" -v @overview_pick 2>/dev/null)
+  sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -vFx "$DASH")
+  set -- -T ' overview: pick sessions '
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    mark='  '
+    printf '%s\n' "$picks" | grep -qFx "$s" && mark='✓ '
+    cmd="run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' pick '$s'\" ; run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' pickmenu\""
+    set -- "$@" "$mark$s" '' "$cmd"
+  done <<EOF
+$sessions
+EOF
+  set -- "$@" '' 'clear all (unpick)' '' "run-shell \"OVERVIEW_SESSION='$DASH' sh '$SELF_PATH' unpick\""
+  if [ -n "${OVERVIEW_PICKMENU_DRYRUN:-}" ]; then
+    for a in "$@"; do printf '%s\n' "$a"; done
+    return 0
+  fi
+  tmux display-menu "$@"
 }
 
 # Make the grid match the live session list: add new sessions, drop closed ones.
@@ -168,6 +338,7 @@ reconcile() {
 build() {
   unset_hooks                                # avoid reconcile races while (re)building
   filter="${1:-.}"
+  valid_regex "$filter" || { msg "invalid regex: $1"; exit 1; }
   targets=$(targets_for "$filter")
   # By default show ALL sessions in the grid (monitoring use case: see everything at once).
   # Set OVERVIEW_EXCLUDE_SELF=1 to hide the session the dashboard was launched from.
@@ -210,7 +381,14 @@ EOF
   tmux set -w -t "$win" pane-border-status top
   tmux set -w -t "$win" pane-border-format "$BORDER_FMT"
   tmux set -t "$DASH" status-style 'bg=colour24,fg=white'
+  # The dashboard is a read-only mirror grid. Force mouse OFF for THIS session only
+  # (global mouse stays as the user set it): otherwise a stray trackpad scroll/click
+  # over a tile drops that pane into copy-mode, which freezes its ~1s refresh AND makes
+  # the tile swallow the f/p/c control keys as copy-mode motions instead of letting the
+  # overview control menu handle them. Session-scoped, so every other session is unaffected.
+  tmux set -t "$DASH" mouse off
   tmux set -t "$DASH" @overview_filter "$filter"   # remembered so hook-driven reconcile respects the same filter
+  tmux set -t "$DASH" @overview_pick ''             # (re)building is regex mode: discard any pick selection
   set_hooks                                         # auto-refresh grid on any session create/close
   reconcile                                         # pick up any session created during the brief hooks-off window
   n=$(tmux list-panes -t "$win" -F x 2>/dev/null | grep -c .)
@@ -247,6 +425,15 @@ case "$1" in
     ;;
   reconcile) reconcile ;;
   kill)      unset_hooks; tmux kill-session -t "=$DASH" 2>/dev/null ;;
+  filter)
+    if [ $# -ge 2 ]; then filter_cmd "$2"; else show_filter; fi
+    ;;
+  unfilter)  unfilter ;;
+  pick)
+    if [ $# -ge 2 ]; then pick_toggle "$2"; else show_picks; fi
+    ;;
+  unpick)    unfilter ;;
+  pickmenu)  pickmenu ;;
   build|"")  build "$2" ;;
-  *) echo "usage: $0 [build [pattern]|toggle|rebuild|zoom|reconcile|kill|mirror <session>]"; exit 2 ;;
+  *) echo "usage: $0 [build [pattern]|toggle|rebuild|zoom|reconcile|kill|filter [regex]|unfilter|pick [session]|unpick|pickmenu|mirror <session>]"; exit 2 ;;
 esac

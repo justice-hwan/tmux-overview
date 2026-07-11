@@ -122,6 +122,101 @@ Known gap: `OVERVIEW_EXCLUDE_SELF` is evaluated only inside `build` (it needs to
 the user launched from — information a server-side hook doesn't have), so a hook-driven reconcile
 can re-add the launcher session. Persistent exclusion should use the filter pattern instead.
 
+### 4.6 Filter lifecycle, and why ERE instead of BRE
+
+`@overview_filter` is the single source of truth for "which sessions does this dashboard show,"
+and `reconcile()` (§4.5) is its only consumer — it doesn't care whether the value came from `build`,
+`filter`, or a pick-mode compile (§4.7). That's deliberate: every write path funnels through the
+same `tmux set -t "$DASH" @overview_filter "$pat"` + `set_hooks` + `reconcile` sequence, so adding
+`filter`/`unfilter`/pick mode required zero changes to reconcile itself.
+
+`filter_cmd()` (backing the `filter` subcommand) treats a candidate pattern as two questions, both
+of which must pass before `@overview_filter` is touched:
+
+1. **Is it a syntactically valid ERE?** `valid_regex()` feeds an empty line through
+   `grep -E -e "$pat"` and checks the exit code is `0` or `1` (match / no-match) rather than `>1`
+   (`grep`'s convention for a syntax error) — so `'agent-(a'` (unbalanced paren) is rejected without
+   ever reaching `@overview_filter`.
+2. **Does it currently match at least one live session?** A syntactically-valid-but-vacuous filter
+   (typo'd session name, wrong prefix) is rejected the same way. Together these mean a bad `filter`
+   invocation leaves the previous filter — and thus the dashboard's contents — untouched instead of
+   silently blanking the grid.
+
+**BRE → ERE.** `targets_for()`'s matcher changed from `grep -e` (POSIX Basic RE) to `grep -E -e`
+(POSIX Extended RE) — the only semantic change to pre-existing behavior in this feature (see the
+compatibility note below `targets_for()` and the repo's risk log). The common subset (`^ $ . [] *`
+and literals) is unaffected; only patterns relying on BRE's backslashed metacharacters (`\|` `\(`
+`\{`) change meaning. ERE was chosen over keeping BRE because the user-facing ask was "regex
+filtering," which implies unescaped alternation (`agent-(a|b)`) — the natural reading of "regex" to
+someone typing at a `command-prompt`, not shell-quoting BRE escapes.
+
+**Why not tmux's own `#{m:}` / `#{m/r:}` format expressions instead of shelling out to `grep`?**
+Both were considered and rejected. `#{m:pattern,string}` and `#{m/r:pattern,string}` are single
+substitutions evaluated *inside a tmux format string* (status-line, pane-border-format, etc.) — they
+answer "does this one string match," not "filter this list of session names," so using them here
+would mean invoking tmux once per candidate session just to get a boolean, with no efficiency or
+clarity win over one `grep -E` pass over `list-sessions` output. They also inherit tmux's own
+format-string parsing rules, where a literal comma inside the pattern or string argument is read as
+the argument separator — the exact class of problem already worked around in `BORDER_FMT`'s nested
+`#{?...}` conditionals (see the comment above its definition). A user-supplied ERE containing a
+comma (e.g. `agent-\{2,4\}`) would silently misparse as two arguments instead of failing loudly, which
+is worse than `grep`'s clean non-zero exit. Shelling out to `grep -E` keeps validation, matching, and
+error signaling in one well-understood place.
+
+### 4.7 Pick mode: compiling a checkbox selection into the same pipeline
+
+tmux's `display-menu` has no built-in multi-select/checkbox primitive — each invocation renders once
+and exits after a single choice. Pick mode fakes persistence by having every item's command run the
+toggle *and then re-invoke `pickmenu` itself*, so the menu appears to "stay open" across clicks (each
+click is actually a fresh `display-menu` call with an updated checkmark set) — see `pickmenu()`'s
+per-item `run-shell "... pick '$s'" ; run-shell "... pickmenu"` command string.
+
+Rather than teach `reconcile()` a second, allow-list-shaped filter representation, pick mode reuses
+the existing regex pipeline unchanged: the raw pick set and its compiled form are stored separately.
+
+- **`@overview_pick`** — the source of truth for the checkbox UI: newline-separated session names,
+  written by `pick_toggle()`/`apply_pick()`, read back by `pickmenu()` to decide which items show `✓`
+  and by `show_picks()` for the CLI. This is what a same-named session reappearing gets matched
+  against — picking is by name, not by the compiled pattern.
+- **`@overview_filter`** — what `reconcile()` actually reads (§4.5), set by `compile_pick()` to an
+  anchored ERE alternation of the picked names, e.g. `{agent-a, web}` → `^(agent-a|web)$`. Session
+  names are passed through `ere_escape()` (`sed 's/[][(){}.^$*+?|\\]/\\&/g'`, `LC_ALL=C` for
+  byte-safety with multibyte names) first, so a session literally named `a.b` or `x(1)` matches
+  itself exactly rather than being interpreted as a pattern.
+
+Because `@overview_filter` ends up holding an ordinary ERE either way, `reconcile()` needs no
+awareness that pick mode exists at all — the entire feature is additive at the CLI/keybinding layer.
+An empty pick set compiles to an empty pattern, which `apply_pick()` special-cases into a call to
+`unfilter()` (equivalent to "no filter," not "match nothing").
+
+**Single active filter.** Regex mode and pick mode are mutually exclusive by design — there is one
+dashboard, one grid, one mental model of "what's currently filtered." `filter_cmd()` clears
+`@overview_pick` on every regex-mode write; `apply_pick()`/`pick_toggle()` overwrite
+`@overview_filter` on every pick-mode write; `unfilter`/`unpick` (an alias) clear both. A user can't
+end up in a state where the UI shows checkmarks that don't match what's actually filtered, or vice
+versa.
+
+**Keybinding layer — a `display-menu` pop-up, not a prefix key or a modal key-table.** The
+filter/pick controls are *not* bound as plain prefix keys. Single letters like `f` and `p` are
+heavily used tmux built-ins (`find-window`, `previous-window`), so claiming them in the global prefix
+table silently steals bindings the user relies on. Instead the plugin binds one key — `prefix + C-a`
+(option `@overview-menu-key`) → `display-menu` — that opens a small pop-up listing *Filter (regex)…*,
+*Pick sessions…*, and *Clear filter*, with `f`/`p`/`c` as in-menu mnemonics (arrow keys and the mouse
+work too). Because `f`/`p`/`c` live *inside* the menu rather than in the global prefix table, the
+built-ins stay untouched, and the feature stays strictly additive: the CLI subcommands are unchanged,
+and the only global-namespace cost is one menu key instead of three prefix keys.
+
+An earlier revision used a modal `switch-client -T overview` one-shot key-table for the same three
+controls. That turned out to be fragile — especially under an input method (IME). A key-table
+consults the *next* keypress and, on any key it doesn't have bound, silently resets to the `root`
+table **and re-injects that key into the active pane**. Under the Korean 2-beolsik IME the latin
+`f`/`p`/`c` never arrive as latin at all — they reach tmux as Hangul jamo (`f`→ㄹ, `p`→ㅔ, `c`→ㅊ) —
+so the table matched nothing and leaked the keystroke straight into whatever mirror tile was focused.
+A `display-menu` has no such failure mode: it is a client overlay that consumes *every* key until it
+closes, so nothing can leak into a tile no matter what the keyboard layer emits. The menu is also
+immune to a tile's copy-mode/mouse state and to the ~1 s mirror repaint, which a pane-scoped modal
+mode was not.
+
 ## 5. Minimum tmux version — rationale
 
 Feature-by-feature floor of everything the script uses:

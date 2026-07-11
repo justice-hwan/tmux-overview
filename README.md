@@ -40,7 +40,7 @@ Green border = output flowing in the last few seconds (agent busy). Yellow borde
 - **RUN / IDLE status on each tile's border.** Shown in the tile's top border — the divider that also carries the session name — and drawn by tmux itself, so it never flickers. Based on `window_activity`: output within the last 3 s → **RUN** (green); otherwise **IDLE Ns** (yellow); a vanished session shows **DEAD** (red). The color changes live with state. Since agents keep the screen updating while working (spinners, streaming), this cleanly separates "busy" from "waiting for you".
 - **Self-updating grid.** Global `session-created` / `session-closed` hooks (registered at index `[99]`, so they coexist with your own hooks) reconcile the grid automatically — new sessions get a tile, closed ones lose theirs. If the dashboard is gone, the hooks remove themselves.
 - **One-key zoom.** Focus a tile, hit a key, and you `switch-client` full-screen into that session — same terminal client, so no nested-attach resize side effects. Same key brings you back to the grid.
-- **Session filtering.** `build '<pattern>'` shows only matching sessions; the pattern is remembered in the `@overview_filter` session option so hook-driven updates respect it.
+- **Session filtering, two ways.** A live ERE filter (`filter '<regex>'`, cleared with `unfilter`) narrows the grid to matching session names, remembered in the `@overview_filter` session option so hook-driven updates keep respecting it. Or pick sessions one at a time with a checkbox menu (`pickmenu` / `pick <session>`) when you don't want to write a regex. The two modes share one underlying filter and are mutually exclusive — switching to one clears the other.
 - **Zero dependencies.** One POSIX `sh` script + tmux. Works from any install location (resolves its own absolute path for hooks and tiles).
 
 ## Requirements
@@ -67,12 +67,21 @@ cat >> ~/.tmux.conf <<'EOF'
 bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"
 bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"
 bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
+
+# Filter/pick live in a small pop-up menu (a tmux display-menu) opened with
+# <prefix> C-a, so they never clobber your global prefix keys (find-window /
+# previous-window stay intact). In the menu: f=filter, p=pick, c=clear - or
+# use the arrow keys / mouse.
+bind-key C-a display-menu -T "#[align=centre] overview " \
+  "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
+  "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
 EOF
 
 # 3. Reload, then CONFIRM the keys registered — this one check catches the most
 #    common setup mistake (bindings added to a file tmux didn't load):
 tmux source-file ~/.tmux.conf
-tmux list-keys | grep overview.sh          # must print three lines; if empty, see Troubleshooting
+tmux list-keys | grep overview.sh          # must print four lines (a/A/Enter + the C-a menu); if empty, see Troubleshooting
 ```
 
 Or clone the repo and run the bundled installer, which copies the script to `${XDG_BIN_HOME:-$HOME/.local/bin}` and prints the keybinding snippet:
@@ -96,7 +105,10 @@ Then press `prefix + I` to install. The plugin binds the default keys below; cus
 set -g @overview-key 'a'            # toggle dashboard (default: a)
 set -g @overview-rebuild-key 'A'    # force rebuild    (default: A)
 set -g @overview-enter-key 'Enter'  # zoom into tile   (default: Enter)
+set -g @overview-menu-key 'C-a'     # filter/pick pop-up menu (default: C-a)
 ```
+
+The filter and pick controls live in a small pop-up menu (a tmux `display-menu`) opened with `prefix + C-a`, so they never overwrite your global prefix keys — tmux's built-in `find-window` (`f`) and `previous-window` (`p`) stay exactly where they are. In the menu, press `f` filter, `p` pick, `c` clear — or use the arrow keys / mouse; any other key (or Escape) closes it. A menu is a client overlay, so its keys are consumed by the menu and never leak into a mirror tile.
 
 ## Keybindings
 
@@ -107,9 +119,17 @@ For manual installs, add this to `~/.tmux.conf` (adjust the path to where you pu
 bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"   # outside: open dashboard / inside: enter focused tile
 bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"  # force rebuild (rarely needed — grid self-updates)
 bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"     # inside dashboard: enter focused tile's session
+
+# Filter/pick controls live in a small pop-up menu (a display-menu) so they never
+# clobber your global prefix keys — find-window and previous-window stay intact.
+# In the menu: f=filter, p=pick, c=clear (or use the arrow keys / mouse).
+bind-key C-a display-menu -T "#[align=centre] overview " \
+  "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
+  "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
 ```
 
-All keys are freely customizable — these are only suggestions. In particular, if you use `C-a` as your tmux prefix, `prefix + a` may clash with a habit or another binding; pick any key you like (`bind-key g ...` etc.). The script itself never binds keys.
+All keys are freely customizable — these are only suggestions. In particular, if you use `C-a` as your tmux prefix, `prefix + a` may clash with a habit or another binding; pick any key you like (`bind-key g ...` etc.). The `C-a` menu leader is likewise just a default — swap it for any free key if `C-a` is taken. The script itself never binds keys.
 
 ## Usage & workflow
 
@@ -127,12 +147,17 @@ The script can also be driven directly (run from inside any tmux client):
 
 | Command | What it does |
 |---|---|
-| `overview.sh build [pattern]` | (Re)create the dashboard. Optional grep `pattern` filters session names (default: all). |
+| `overview.sh build [pattern]` | (Re)create the dashboard. Optional `pattern` (POSIX ERE, i.e. `grep -E` syntax) filters session names (default: all). |
 | `overview.sh toggle` | Outside the dashboard: open (building if needed). Inside: switch into the focused tile's session (or back to the previous session if the tile is dead). |
 | `overview.sh rebuild` | Force a re-sync of the grid in place (no teardown, so an attached client is never dropped), or build it if absent. |
 | `overview.sh zoom` | Inside the dashboard: switch into the focused tile's session. |
 | `overview.sh reconcile` | Sync the grid with the live session list (normally fired by hooks). |
 | `overview.sh kill` | Remove the dashboard session and unregister its hooks. |
+| `overview.sh filter [regex]` | Validate `regex` (ERE), apply it in place, and remember it in `@overview_filter`. No arg: print the current filter. `filter ''` is equivalent to `unfilter`. Rejected (existing filter kept) on invalid syntax or on a pattern matching zero sessions. |
+| `overview.sh unfilter` | Clear the filter (regex or pick, whichever is active) and show every session again. No dashboard: no-op. |
+| `overview.sh pick [session]` | Toggle `session` in the checkbox pick set, recompiled into `@overview_filter` behind the scenes. No arg: print the current picks. |
+| `overview.sh unpick` | Alias for `unfilter` (clears both pick and regex state). |
+| `overview.sh pickmenu` | Open a `display-menu` checkbox UI over the live session list (bound to a key; see Keybindings). |
 | `overview.sh mirror <session>` | Internal — the mirror loop that runs inside each tile. |
 
 ## Configuration
@@ -154,17 +179,35 @@ Since keybindings invoke the script through `run-shell`, set variables inline in
 bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 OVERVIEW_IDLE_SEC=5 $HOME/.local/bin/overview.sh toggle"
 ```
 
-**Filtering with `@overview_filter`.** `build` accepts a grep pattern and stores it in the dashboard session's `@overview_filter` option, so automatic reconciles keep honoring it:
+### Filtering
+
+There are two ways to show only some sessions. They share one underlying filter and are mutually exclusive — switching to one clears the other. Both are stored in dashboard session options (`@overview_filter`, and `@overview_pick` for the pick set), so hook-driven reconciles keep honoring whichever is active, and the filter survives `rebuild`/`toggle`.
+
+**Regex mode.** Type an ERE (POSIX Extended Regular Expression — same dialect as `grep -E`) and it's validated, applied in place, and remembered:
 
 ```sh
-overview.sh build '^agent-'    # only sessions whose names start with "agent-"
+overview.sh filter '^agent-'   # only sessions whose names start with "agent-"
+overview.sh filter             # print the current filter
+overview.sh unfilter           # back to showing every session
 ```
 
+`prefix + C-a` opens the control menu; choose **Filter** (`f`) to type a pattern (`command-prompt`), or **Clear filter** (`c`) to drop it. An invalid regex or one that matches zero sessions is rejected and the previous filter is kept — a typo can't blank the dashboard. `build [pattern]` still works exactly like this for scripting/bindings (same ERE syntax, same option):
+
 ```tmux
-# or as a binding that always builds a filtered dashboard:
-bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"
+# a binding that always builds a filtered dashboard:
 bind-key A run-shell "$HOME/.local/bin/overview.sh build '^agent-'"
 ```
+
+**Pick mode.** When you'd rather check off sessions by name than write a regex, `prefix + C-a` then **Pick sessions** (`p`) opens a `display-menu` checkbox over the live session list — each item toggles that session and reopens the menu. Under the hood, the selected names are compiled into an anchored ERE alternation (`^(name1|name2)$`) and applied through the same `@overview_filter` path as regex mode, so both share one code path with no special-casing in the hook-driven reconcile logic.
+
+```sh
+overview.sh pickmenu            # open the checkbox menu (needs an attached client)
+overview.sh pick 'agent-a'      # toggle one session from the CLI (works headless too)
+overview.sh pick                # print the current picks
+overview.sh unpick              # clear the pick set (alias for unfilter)
+```
+
+A session killed while picked drops out of the grid immediately (like regex mode), but its name stays in `@overview_pick` — if a same-named session reappears, it's automatically picked again. Session names containing metacharacters (`( ) [ ] . * + ? ^ $ | \`) are escaped automatically, so `pick` always matches by exact name regardless of regex syntax.
 
 ## How it works
 
@@ -189,7 +232,7 @@ Honest constraints, by design or by tmux's nature:
 **`prefix + a` does nothing / no reaction.** The script and tmux are almost always fine — the keybinding simply isn't loaded. This is the most common setup issue. Check first:
 
 ```sh
-tmux list-keys | grep overview.sh     # should print three lines
+tmux list-keys | grep overview.sh     # should print four lines
 ```
 
 - **Prints nothing** → the bindings aren't loaded — you either skipped the `bind-key` lines, didn't reload, or put them in a file tmux doesn't read. Ask tmux exactly which files it loaded and make sure your bindings are in one of them:
@@ -202,7 +245,7 @@ tmux list-keys | grep overview.sh     # should print three lines
 
   To confirm the tool itself works in the meantime, bind live (no file needed): `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
 
-- **Prints the three lines but the key still does nothing** → you're pressing the wrong prefix, or `a` is shadowed. Check your prefix (default `C-b`) and press *that*, then `a`:
+- **Prints the four lines but the key still does nothing** → you're pressing the wrong prefix, or `a` is shadowed. Check your prefix (default `C-b`) and press *that*, then `a`:
 
   ```sh
   tmux show -g prefix
@@ -218,7 +261,8 @@ tmux list-keys | grep overview.sh     # should print three lines
 # 1. Stop the dashboard and remove its global hooks:
 ~/.local/bin/overview.sh kill
 
-# 2. Delete the three bind-key lines from your tmux config, then reload.
+# 2. Delete the tmux-overview bind-key lines from your tmux config, then reload.
+#    (the three prefix keys plus the C-a menu binding)
 #    Use the file `tmux display -p '#{config_files}'` reports.
 
 # 3. Delete the script:

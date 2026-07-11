@@ -49,12 +49,20 @@ cat >> ~/.tmux.conf <<'EOF'
 bind-key a     run-shell "$HOME/.local/bin/overview.sh toggle"
 bind-key A     run-shell "$HOME/.local/bin/overview.sh rebuild"
 bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
+
+# 필터/픽 컨트롤은 작은 팝업 메뉴(tmux display-menu)에 둬서 전역 prefix 키를
+# 덮어쓰지 않습니다(기존 find-window / previous-window 그대로 유지). <prefix> C-a로
+# 열고, 메뉴 안에서 f=필터, p=픽, c=해제 — 또는 화살표 키 / 마우스로 이동.
+bind-key C-a display-menu -T "#[align=centre] overview " \
+  "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
+  "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
 EOF
 
-# 3. 리로드 후 반드시 등록 확인 — 3줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것
+# 3. 리로드 후 반드시 등록 확인 — 4줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것
 #    (실제 로드 파일 확인: tmux display -p '#{config_files}')
 tmux source-file ~/.tmux.conf
-tmux list-keys | grep overview.sh          # 3줄 나와야 정상; 비면 아래 '문제 해결' 참고
+tmux list-keys | grep overview.sh          # 4줄(a/A/Enter + C-a 메뉴) 나와야 정상; 비면 아래 '문제 해결' 참고
 ```
 
 또는 repo를 클론해서 번들 설치 스크립트를 실행하면 `${XDG_BIN_HOME:-$HOME/.local/bin}`에 복사하고 키바인딩 스니펫을 출력해줍니다:
@@ -64,7 +72,7 @@ git clone https://github.com/justice-hwan/tmux-overview.git
 cd tmux-overview && ./install.sh
 ```
 
-키는 자유롭게 바꿀 수 있어요(제안일 뿐). 특히 **`C-a`를 prefix로 쓰면** `prefix + a`가 충돌할 수 있으니 다른 키(`bind-key g ...` 등)로 하세요. 스크립트 자체는 키를 바인딩하지 않습니다.
+키는 자유롭게 바꿀 수 있어요(제안일 뿐). 특히 **`C-a`를 prefix로 쓰면** `prefix + a`가 충돌할 수 있으니 다른 키(`bind-key g ...` 등)로 하세요. `C-a` 메뉴 리더도 마찬가지로 기본값일 뿐이니 `C-a`가 이미 쓰이면 다른 빈 키로 바꾸면 됩니다. 스크립트 자체는 키를 바인딩하지 않습니다.
 
 ### TPM (Tmux Plugin Manager)
 
@@ -80,7 +88,10 @@ set -g @plugin 'justice-hwan/tmux-overview'
 set -g @overview-key 'a'            # 토글 (기본: a)
 set -g @overview-rebuild-key 'A'    # 강제 리빌드 (기본: A)
 set -g @overview-enter-key 'Enter'  # 타일 진입 (기본: Enter)
+set -g @overview-menu-key 'C-a'     # 필터/픽 팝업 메뉴 (기본: C-a)
 ```
+
+필터/픽 컨트롤은 `prefix + C-a`로 여는 작은 팝업 메뉴(tmux `display-menu`)에 있어서 전역 prefix 키를 절대 덮어쓰지 않습니다 — tmux 내장 `find-window`(`f`)와 `previous-window`(`p`)가 그대로 유지됩니다. 메뉴 안에서 `f` 필터, `p` 픽, `c` 해제 — 또는 화살표 키 / 마우스로 이동; 그 밖의 키(또는 Escape)는 닫기. 메뉴는 클라이언트 오버레이라 키를 메뉴가 소비하므로 미러 타일로 새지 않습니다.
 
 ## 사용 흐름
 
@@ -102,7 +113,35 @@ set -g @overview-enter-key 'Enter'  # 타일 진입 (기본: Enter)
 bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 $HOME/.local/bin/overview.sh toggle"
 ```
 
-세션 필터: `overview.sh build '^agent-'` — 패턴은 `@overview_filter` 세션 옵션에 저장되어 자동 갱신에도 유지됩니다.
+### 필터링
+
+세션 일부만 보는 방법은 두 가지입니다. 내부적으로는 필터 하나를 공유하며 서로 배타적입니다 — 한쪽을 켜면 다른 쪽은 해제됩니다. 둘 다 대시보드 세션 옵션(`@overview_filter`, 픽 모드는 추가로 `@overview_pick`)에 저장되므로, 훅 기반 자동 갱신에도 계속 적용되고 `rebuild`/`toggle` 후에도 유지됩니다.
+
+**Regex 모드.** ERE(POSIX 확장 정규식 — `grep -E`와 같은 문법)를 입력하면 검증 후 즉시 적용되고 기억됩니다:
+
+```sh
+overview.sh filter '^agent-'   # 이름이 "agent-"로 시작하는 세션만
+overview.sh filter             # 현재 필터 출력
+overview.sh unfilter           # 필터 해제, 전체 세션 표시
+```
+
+`prefix + C-a`로 컨트롤 메뉴를 열고 **Filter**(`f`)로 패턴을 입력하거나(`command-prompt`), **Clear filter**(`c`)로 필터를 지웁니다. 잘못된 정규식이거나 매칭되는 세션이 0개면 거부되고 이전 필터가 유지됩니다 — 오타 하나로 대시보드가 텅 비는 일은 없습니다. `build [pattern]`도 스크립팅/바인딩용으로 동일하게 동작합니다(같은 ERE 문법, 같은 옵션):
+
+```tmux
+# 항상 필터링된 대시보드를 여는 바인딩:
+bind-key A run-shell "$HOME/.local/bin/overview.sh build '^agent-'"
+```
+
+**픽(Pick) 모드.** 정규식 대신 이름으로 체크박스 선택하고 싶다면 `prefix + C-a` 다음 **Pick sessions**(`p`)로 살아있는 세션 목록 위에 `display-menu` 체크박스가 뜹니다 — 항목을 누르면 그 세션이 토글되고 메뉴가 다시 열립니다. 내부적으로는 선택된 이름들을 앵커된 ERE 대체 패턴(`^(name1|name2)$`)으로 컴파일해서 regex 모드와 동일한 `@overview_filter` 경로로 적용하므로, 훅 기반 자동 갱신 로직에는 별도 분기가 전혀 없습니다.
+
+```sh
+overview.sh pickmenu            # 체크박스 메뉴 열기 (attach된 클라이언트 필요)
+overview.sh pick 'agent-a'      # CLI에서 세션 하나 토글 (헤드리스에서도 동작)
+overview.sh pick                # 현재 픽 목록 출력
+overview.sh unpick              # 픽 목록 초기화 (unfilter의 별칭)
+```
+
+픽 상태에서 세션이 죽으면 (regex 모드와 마찬가지로) 즉시 그리드에서 빠지지만, 이름은 `@overview_pick`에 그대로 남습니다 — 같은 이름의 세션이 다시 생기면 자동으로 다시 픽됩니다. 세션명에 메타문자(`( ) [ ] . * + ? ^ $ | \`)가 있어도 자동으로 이스케이프되므로, `pick`은 항상 이름 그대로를 정확히 매칭합니다.
 
 ## 한계 (정직하게)
 
@@ -117,11 +156,11 @@ bind-key a run-shell "OVERVIEW_WIDTH=220 OVERVIEW_HEIGHT=60 $HOME/.local/bin/ove
 **`prefix + a` 무반응.** 스크립트·tmux는 대개 정상이고, 키바인딩이 안 올라간 겁니다 (제일 흔한 설치 실수). 먼저 확인:
 
 ```sh
-tmux list-keys | grep overview.sh   # 3줄 나와야 정상
+tmux list-keys | grep overview.sh   # 4줄 나와야 정상
 ```
 
 - **아무것도 안 나옴** → 바인딩 미로드. bind-key를 안 넣었거나, 리로드를 안 했거나, tmux가 안 읽는 파일에 넣은 것. `tmux display -p '#{config_files}'`로 실제 로드되는 파일을 확인해 거기에 넣고 `tmux source-file`. 도구 동작만 먼저 확인하려면 실행 중 tmux에 직접 바인딩: `tmux bind-key a run-shell "$HOME/.local/bin/overview.sh toggle"`.
-- **3줄 나오는데도 안 됨** → prefix를 잘못 눌렀거나 키 충돌. `tmux show -g prefix`로 prefix 확인(기본 `C-b`) 후 그 prefix + `a`. `C-a`가 prefix면 `a`와 충돌할 수 있으니 다른 키로.
+- **4줄 나오는데도 안 됨** → prefix를 잘못 눌렀거나 키 충돌. `tmux show -g prefix`로 prefix 확인(기본 `C-b`) 후 그 prefix + `a`. `C-a`가 prefix면 `a`와 충돌할 수 있으니 다른 키로.
 
 ## 제거
 
@@ -129,7 +168,8 @@ tmux list-keys | grep overview.sh   # 3줄 나와야 정상
 # 1. 대시보드 세션 + 전역 훅 제거:
 ~/.local/bin/overview.sh kill
 
-# 2. tmux 설정 파일에서 bind-key 3줄 삭제 후 리로드
+# 2. tmux 설정 파일에서 tmux-overview bind-key 줄 삭제 후 리로드
+#    (prefix 3키 + C-a 메뉴 바인딩)
 #    (파일 경로 확인: tmux display -p '#{config_files}')
 
 # 3. 스크립트 삭제:
