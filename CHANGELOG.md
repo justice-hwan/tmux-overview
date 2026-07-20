@@ -4,7 +4,7 @@ Notable changes to **tmux-overview**. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims for
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-20
 
 ### Added
 - **Configurable / adaptive refresh interval.** Each tile's re-render rate is now
@@ -67,4 +67,5 @@ tested floor tmux ≥ 3.2).
 - GitHub Actions CI running `shellcheck` + `sh -n` / `bash -n` + the smoke test
   on Linux / tmux 3.4. All scripts are `shellcheck`-clean.
 
+[0.2.0]: https://github.com/justice-hwan/tmux-overview/releases/tag/v0.2.0
 [0.1.0]: https://github.com/justice-hwan/tmux-overview/releases/tag/v0.1.0
