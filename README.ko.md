@@ -52,11 +52,12 @@ bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
 
 # 필터/픽 컨트롤은 작은 팝업 메뉴(tmux display-menu)에 둬서 전역 prefix 키를
 # 덮어쓰지 않습니다(기존 find-window / previous-window 그대로 유지). <prefix> C-a로
-# 열고, 메뉴 안에서 f=필터, p=픽, c=해제 — 또는 화살표 키 / 마우스로 이동.
+# 열고, 메뉴 안에서 f=필터, p=픽, c=해제, r=갱신주기 — 또는 화살표 키 / 마우스로 이동.
 bind-key C-a display-menu -T "#[align=centre] overview " \
   "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
   "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
-  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\"" \
+  "Refresh interval…" r "run-shell \"$HOME/.local/bin/overview.sh intervalmenu\""
 EOF
 
 # 3. 리로드 후 반드시 등록 확인 — 4줄이 안 나오면 tmux가 안 읽는 파일에 넣은 것
@@ -89,6 +90,7 @@ set -g @overview-key 'a'            # 토글 (기본: a)
 set -g @overview-rebuild-key 'A'    # 강제 리빌드 (기본: A)
 set -g @overview-enter-key 'Enter'  # 타일 진입 (기본: Enter)
 set -g @overview-menu-key 'C-a'     # 필터/픽 팝업 메뉴 (기본: C-a)
+set -g @overview-interval '1'       # 갱신 주기(초) 또는 'auto' (기본: 1)
 ```
 
 필터/픽 컨트롤은 `prefix + C-a`로 여는 작은 팝업 메뉴(tmux `display-menu`)에 있어서 전역 prefix 키를 절대 덮어쓰지 않습니다 — tmux 내장 `find-window`(`f`)와 `previous-window`(`p`)가 그대로 유지됩니다. 메뉴 안에서 `f` 필터, `p` 픽, `c` 해제 — 또는 화살표 키 / 마우스로 이동; 그 밖의 키(또는 Escape)는 닫기. 메뉴는 클라이언트 오버레이라 키를 메뉴가 소비하므로 미러 타일로 새지 않습니다.
@@ -114,7 +116,7 @@ set -g @overview-menu-key 'C-a'     # 필터/픽 팝업 메뉴 (기본: C-a)
 | `OVERVIEW_SESSION` | `overview` | 대시보드 세션 이름 |
 | `OVERVIEW_WIDTH` / `OVERVIEW_HEIGHT` | `188` / `53` | 대시보드 세션 생성 크기 (터미널 크기에 맞추면 타일 배치가 정확) |
 | `OVERVIEW_IDLE_SEC` | `3` | RUN → IDLE 판정 기준 (초) |
-| `OVERVIEW_INTERVAL` | `1` | 미러 갱신 주기 (초) |
+| `OVERVIEW_INTERVAL` | `1` | 기본 미러 갱신 주기 — 초(소수 가능), 또는 `auto`. `set -g @overview-interval`로도 설정, 또는 **Refresh interval** 메뉴에서 실시간 변경(아래 참고). |
 | `OVERVIEW_EXCLUDE_SELF` | (미설정) | 설정 시 대시보드를 연 세션을 그리드에서 제외 (build 시점에만 적용) |
 
 키바인딩에서 인라인으로 지정:
@@ -152,6 +154,21 @@ overview.sh unpick              # 픽 목록 초기화 (unfilter의 별칭)
 ```
 
 픽 상태에서 세션이 죽으면 (regex 모드와 마찬가지로) 즉시 그리드에서 빠집니다 — 단, 마지막 남은 타일이면 tmux 윈도우는 pane이 최소 1개 있어야 하므로 **DEAD** 타일로 남습니다. 이름은 `@overview_pick`에 그대로 남고 — 같은 이름의 세션이 다시 생기면 자동으로 다시 픽됩니다. 세션명에 메타문자(`( ) [ ] . * + ? ^ $ | \`)가 있어도 자동으로 이스케이프되므로, `pick`은 항상 이름 그대로를 정확히 매칭합니다.
+
+### 갱신 주기
+
+타일은 타이머로 다시 그려집니다(기본 **1초**). `prefix + C-a` → **Refresh interval**(`r`)에서 실시간 변경: 프리셋(0.25 / 0.5 / 1 / 2초), **auto**, **custom…** 중 선택. 현재값은 표시되고, 변경은 한 프레임 안에 적용됩니다(rebuild 불필요).
+
+- **고정** — 초 단위 숫자. 소수(0.25/0.5)는 세션이 몇 개 없을 때 더 빠릿합니다 — 단 `sleep`가 소수를 지원해야 합니다(macOS·GNU는 지원, 엄격 POSIX `sleep`는 1초로 폴백).
+- **`auto`** — 타일 수에 따라 조절: 1~2개면 ~0.25초, 4개 이상이면 1초. 볼 게 적을 땐 빠르게, 그리드가 꽉 차면 차분하게.
+
+새로 빌드될 때의 기본값은 `~/.tmux.conf`에서:
+
+```tmux
+set -g @overview-interval '0.5'    # 또는 'auto', 또는 초 단위 숫자
+```
+
+또는 직접: `overview.sh interval 0.5` / `overview.sh interval auto` / `overview.sh interval`(현재값 출력). 메뉴·CLI 변경은 런타임이며, 전체 rebuild(`prefix + A`)는 `@overview-interval`을 다시 읽습니다.
 
 ## 한계 (정직하게)
 

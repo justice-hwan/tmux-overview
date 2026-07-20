@@ -8,6 +8,7 @@
 #   set -g @overview-rebuild-key 'A'    # force rebuild    (default: A)
 #   set -g @overview-enter-key 'Enter'  # zoom into tile   (default: Enter)
 #   set -g @overview-menu-key 'C-a'     # filter/pick pop-up menu (default: C-a)
+#   set -g @overview-interval '1'       # refresh interval in seconds, or 'auto' (default: 1)
 #
 # The filter/pick controls live in a small pop-up menu (tmux `display-menu`)
 # opened with <prefix> <menu-key>, so they never clobber your global prefix
@@ -17,6 +18,7 @@
 #   f  regex filter prompt  (empty pattern = clear/show all)
 #   p  checkbox pick menu    (per-session ✓ toggles; includes "clear all")
 #   c  clear filter/pick     (show every session)
+#   r  refresh-interval submenu (0.25/0.5/1/2 s, or auto)
 #
 # Or navigate with the arrow keys / mouse; any other key (or Escape) closes it.
 # A menu is a client overlay: it consumes every key, so nothing leaks into a
@@ -56,7 +58,8 @@ main() {
   tmux bind-key "$menu_key" display-menu -T "#[align=centre] overview " \
     "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$CURRENT_DIR/overview.sh filter '%%'\\\"\"" \
     "Pick sessions…"  p "run-shell \"$CURRENT_DIR/overview.sh pickmenu\"" \
-    "Clear filter"    c "run-shell \"$CURRENT_DIR/overview.sh unfilter\""
+    "Clear filter"    c "run-shell \"$CURRENT_DIR/overview.sh unfilter\"" \
+    "Refresh interval…" r "run-shell \"$CURRENT_DIR/overview.sh intervalmenu\""
 }
 
 main

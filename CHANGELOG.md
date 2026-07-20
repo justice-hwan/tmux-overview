@@ -4,6 +4,19 @@ Notable changes to **tmux-overview**. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims for
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Configurable / adaptive refresh interval.** Each tile's re-render rate is now
+  a live setting: change it from `prefix + C-a` → **Refresh interval** (presets
+  0.25 / 0.5 / 1 / 2 s, `auto`, or custom), from the CLI (`overview.sh interval
+  <s|auto>`), or as a default via `set -g @overview-interval`. Changes apply
+  within one frame — the mirror re-reads `@overview_interval` each tick, so no
+  rebuild is needed. `auto` scales the interval with the tile count (~0.25 s for
+  a session or two, up to 1 s when the grid is full). Sub-second values need a
+  `sleep` that accepts fractional seconds (macOS / GNU); otherwise they degrade
+  to 1 s.
+
 ## [0.1.0] — 2026-07-12
 
 First tagged release: a read-only, self-updating tiled dashboard of every tmux

@@ -33,11 +33,12 @@ bind-key Enter run-shell "__DEST__/overview.sh zoom"     # inside dashboard: ent
 # Filter/pick controls live in a small pop-up menu (a tmux display-menu) opened
 # with <prefix> C-a, so they never clobber your global prefix keys (tmux's
 # built-in find-window / previous-window stay intact). In the menu: f=filter,
-# p=pick, c=clear - or navigate with the arrow keys / mouse.
+# p=pick, c=clear, r=refresh interval - or navigate with the arrow keys / mouse.
 bind-key C-a display-menu -T "#[align=centre] overview " \
   "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"__DEST__/overview.sh filter '%%'\\\"\"" \
   "Pick sessions…"  p "run-shell \"__DEST__/overview.sh pickmenu\"" \
-  "Clear filter"    c "run-shell \"__DEST__/overview.sh unfilter\""
+  "Clear filter"    c "run-shell \"__DEST__/overview.sh unfilter\"" \
+  "Refresh interval…" r "run-shell \"__DEST__/overview.sh intervalmenu\""
 EOF
 
 case ":$PATH:" in

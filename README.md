@@ -70,12 +70,13 @@ bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"
 
 # Filter/pick live in a small pop-up menu (a tmux display-menu) opened with
 # <prefix> C-a, so they never clobber your global prefix keys (find-window /
-# previous-window stay intact). In the menu: f=filter, p=pick, c=clear - or
+# previous-window stay intact). In the menu: f=filter, p=pick, c=clear, r=refresh - or
 # use the arrow keys / mouse.
 bind-key C-a display-menu -T "#[align=centre] overview " \
   "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
   "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
-  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\"" \
+  "Refresh interval…" r "run-shell \"$HOME/.local/bin/overview.sh intervalmenu\""
 EOF
 
 # 3. Reload, then CONFIRM the keys registered — this one check catches the most
@@ -106,6 +107,7 @@ set -g @overview-key 'a'            # toggle dashboard (default: a)
 set -g @overview-rebuild-key 'A'    # force rebuild    (default: A)
 set -g @overview-enter-key 'Enter'  # zoom into tile   (default: Enter)
 set -g @overview-menu-key 'C-a'     # filter/pick pop-up menu (default: C-a)
+set -g @overview-interval '1'       # refresh interval in seconds, or 'auto' (default: 1)
 ```
 
 The filter and pick controls live in a small pop-up menu (a tmux `display-menu`) opened with `prefix + C-a`, so they never overwrite your global prefix keys — tmux's built-in `find-window` (`f`) and `previous-window` (`p`) stay exactly where they are. In the menu, press `f` filter, `p` pick, `c` clear — or use the arrow keys / mouse; any other key (or Escape) closes it. A menu is a client overlay, so its keys are consumed by the menu and never leak into a mirror tile.
@@ -132,11 +134,12 @@ bind-key Enter run-shell "$HOME/.local/bin/overview.sh zoom"     # inside dashbo
 
 # Filter/pick controls live in a small pop-up menu (a display-menu) so they never
 # clobber your global prefix keys — find-window and previous-window stay intact.
-# In the menu: f=filter, p=pick, c=clear (or use the arrow keys / mouse).
+# In the menu: f=filter, p=pick, c=clear, r=refresh (or use the arrow keys / mouse).
 bind-key C-a display-menu -T "#[align=centre] overview " \
   "Filter (regex)…" f "command-prompt -p \"overview filter (ERE):\" \"run-shell \\\"$HOME/.local/bin/overview.sh filter '%%'\\\"\"" \
   "Pick sessions…"  p "run-shell \"$HOME/.local/bin/overview.sh pickmenu\"" \
-  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\""
+  "Clear filter"    c "run-shell \"$HOME/.local/bin/overview.sh unfilter\"" \
+  "Refresh interval…" r "run-shell \"$HOME/.local/bin/overview.sh intervalmenu\""
 ```
 
 All keys are freely customizable — these are only suggestions. In particular, if you use `C-a` as your tmux prefix, `prefix + a` may clash with a habit or another binding; pick any key you like (`bind-key g ...` etc.). The `C-a` menu leader is likewise just a default — swap it for any free key if `C-a` is taken. The script itself never binds keys.
@@ -180,7 +183,7 @@ All configuration is via environment variables, read each time the script runs:
 | `OVERVIEW_WIDTH` | `188` | Width the dashboard session is created with (it is created detached; match your terminal size so the tile layout is computed correctly). |
 | `OVERVIEW_HEIGHT` | `53` | Height the dashboard session is created with. |
 | `OVERVIEW_IDLE_SEC` | `3` | Seconds without output before a tile flips RUN → IDLE. |
-| `OVERVIEW_INTERVAL` | `1` | Mirror refresh interval, in seconds. |
+| `OVERVIEW_INTERVAL` | `1` | Default mirror refresh interval — seconds (fractional OK), or `auto`. Also settable with `set -g @overview-interval`, or live from the **Refresh interval** menu (see below). |
 | `OVERVIEW_EXCLUDE_SELF` | *(unset)* | If set (to anything), the session you launch the dashboard **from** is left out of the grid. Applied at build time only — see Limitations. |
 
 Since keybindings invoke the script through `run-shell`, set variables inline in the binding:
@@ -220,6 +223,21 @@ overview.sh unpick              # clear the pick set (alias for unfilter)
 ```
 
 A session killed while picked drops out of the grid immediately (like regex mode) — unless it was the *only* remaining tile, which stays as a **DEAD** tile, because a tmux window must keep at least one pane. Its name stays in `@overview_pick` — if a same-named session reappears, it's automatically picked again. Session names containing metacharacters (`( ) [ ] . * + ? ^ $ | \`) are escaped automatically, so `pick` always matches by exact name regardless of regex syntax.
+
+### Refresh interval
+
+Each tile re-renders on a timer (default **1 s**). Change it live from `prefix + C-a` → **Refresh interval** (`r`): pick a preset (0.25 / 0.5 / 1 / 2 s), **auto**, or **custom…**. The current value is marked, and changes apply within one frame — no rebuild.
+
+- **Fixed** — a number of seconds. Sub-second values (0.25, 0.5) feel snappier when you have only a few sessions; they need a `sleep` that accepts fractional seconds (macOS and GNU coreutils do — a strict-POSIX `sleep` degrades to 1 s).
+- **`auto`** — scales with the number of tiles: ~0.25 s for one or two sessions, rising to 1 s at four or more. Fast when there's little to watch, calm when the grid is full.
+
+Set the default a freshly-built dashboard starts with in `~/.tmux.conf`:
+
+```tmux
+set -g @overview-interval '0.5'    # or 'auto', or any number of seconds
+```
+
+Or drive it directly: `overview.sh interval 0.5` / `overview.sh interval auto` / `overview.sh interval` (print the current value). Menu and CLI changes are runtime; a full rebuild (`prefix + A`) re-reads `@overview-interval`.
 
 ## How it works
 

@@ -217,6 +217,27 @@ closes, so nothing can leak into a tile no matter what the keyboard layer emits.
 immune to a tile's copy-mode/mouse state and to the ~1 s mirror repaint, which a pane-scoped modal
 mode was not.
 
+### 4.8 Refresh interval — a live session option the mirror re-reads each tick
+
+The per-tile refresh rate is not baked into the mirror loop; each tile reads
+`@overview_interval` (a dashboard session option) at the top of every frame via
+`mirror_interval()`. That one extra `tmux show` per tile per tick — negligible
+next to the half-dozen `display`/`capture` calls already there — buys a setting
+that applies **live**: the refresh menu, the `interval` subcommand, and a direct
+`set` all take effect within one frame, with no rebuild and no per-tile restart.
+`build` seeds the option from `@overview-interval` (config) / `$OVERVIEW_INTERVAL`
+(env) / `1`; runtime changes overwrite it and survive hook-driven reconciles (a
+full rebuild re-seeds from config).
+
+Two forms share the one option. A number is used verbatim. `auto` is resolved per
+tick from the current tile count — `0.25 s × N`, clamped to `[0.25, 1] s` — so a
+near-empty grid refreshes ~4×/s while a full one settles at 1 s; because each tile
+computes this independently from the same live count, they converge with no
+coordination. Sub-second sleeps depend on the platform `sleep` accepting a
+fractional argument (POSIX only mandates integers). Rather than probe for support,
+the loop just falls back to `sleep 1` when `sleep <frac>` errors — a limited
+`sleep` degrades to 1 s instead of busy-looping.
+
 ## 5. Minimum tmux version — rationale
 
 Feature-by-feature floor of everything the script uses:

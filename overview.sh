@@ -85,8 +85,8 @@ dash_win() { tmux list-windows -t "=$DASH" -F '#{window_id}' 2>/dev/null | head 
 # The command a tile runs: env is baked in because tiles spawn in the tmux
 # server's environment, not the caller's.
 tile_cmd() {
-  printf 'OVERVIEW_IDLE_SEC=%s OVERVIEW_INTERVAL=%s sh %s mirror %s' \
-    "$IDLE_SEC" "$INTERVAL" "$(sq "$SELF_PATH")" "$(sq "$1")"
+  printf 'OVERVIEW_SESSION=%s OVERVIEW_IDLE_SEC=%s OVERVIEW_INTERVAL=%s sh %s mirror %s' \
+    "$(sq "$DASH")" "$IDLE_SEC" "$INTERVAL" "$(sq "$SELF_PATH")" "$(sq "$1")"
 }
 
 # Hard-truncate each stdin line to $1 visible columns, ANSI- and width-aware:
@@ -179,8 +179,24 @@ mirror() {
     printf '%s[H' "$esc"
     printf '%s\n' "$body" | tail -n "$rows" | clip_to_width "$cols"
     printf '%s[J' "$esc"
-    sleep "$INTERVAL"
+    sleep "$(mirror_interval)" 2>/dev/null || sleep 1   # live interval; degrade to 1s if `sleep` lacks fractional support
   done
+}
+
+# mirror_interval : the sleep this tile should use right now. Reads the live
+# @overview_interval session option (set by build / the refresh menu / the CLI),
+# so a change takes effect within one frame -- no rebuild. "auto" scales with the
+# current tile count: 0.25 s per tile, clamped to [0.25, 1] s (snappy when few
+# sessions, ~1 s when many). Falls back to the baked $INTERVAL if unset.
+mirror_interval() {
+  iv=$(tmux show -t "$DASH" -v @overview_interval 2>/dev/null)
+  [ -n "$iv" ] || iv="$INTERVAL"
+  if [ "$iv" = auto ]; then
+    n=$(tmux list-panes -t "=$DASH:" -F x 2>/dev/null | grep -c .)
+    [ "$n" -ge 1 ] 2>/dev/null || n=1
+    iv=$(awk -v n="$n" 'BEGIN{ v=0.25*n; if(v<0.25)v=0.25; if(v>1)v=1; printf "%g", v }')
+  fi
+  printf '%s' "$iv"
 }
 
 HOOK_IDX=99   # global hook slot for auto-refresh (high index avoids clobbering other hooks)
@@ -474,6 +490,7 @@ EOF
   tmux set -t "$DASH" mouse off
   tmux set -t "$DASH" @overview_filter "$filter"   # remembered so hook-driven reconcile respects the same filter
   tmux set -t "$DASH" @overview_pick ''             # (re)building is regex mode: discard any pick selection
+  tmux set -t "$DASH" @overview_interval "$(interval_default)"  # live refresh interval; the menu/CLI change it without a rebuild
   set_hooks                                         # auto-refresh grid on any session create/close
   reconcile                                         # pick up any session created during the brief hooks-off window
   n=$(tmux list-panes -t "$win" -F x 2>/dev/null | grep -c .)
@@ -495,6 +512,76 @@ toggle() {
     tmux switch-client -t "$DASH"
   fi
 }
+
+# --- refresh interval ------------------------------------------------------
+# The mirror re-reads @overview_interval every tick (see mirror_interval), so
+# these change the refresh rate live. Value: a number of seconds (fractional
+# where `sleep` supports it) or "auto" (scale with the tile count).
+
+# valid_interval <v> : true if v is "auto" or a positive number (int or decimal).
+valid_interval() {
+  [ "$1" = auto ] && return 0
+  case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+  awk -v v="$1" 'BEGIN{ exit !(v ~ /^([0-9]+|[0-9]*\.[0-9]+|[0-9]+\.)$/ && v+0>0) }'
+}
+
+# interval_default : seed value for a fresh dashboard -- the @overview-interval
+# tmux option, else $OVERVIEW_INTERVAL, else 1 (invalid config falls back to 1).
+interval_default() {
+  d=$(tmux show -gqv @overview-interval 2>/dev/null)
+  [ -n "$d" ] || d="${OVERVIEW_INTERVAL:-1}"
+  valid_interval "$d" || d=1
+  printf '%s' "$d"
+}
+
+# set_interval <v> : validate and apply live (persist in @overview_interval); the
+# mirror picks it up on its next tick, so no rebuild is needed.
+set_interval() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { msg "no dashboard"; return 0; }
+  valid_interval "$1" || { msg "invalid interval '$1' (seconds, or 'auto')"; exit 1; }
+  tmux set -t "$DASH" @overview_interval "$1"
+  case "$1" in auto) msg "refresh: auto" ;; *) msg "refresh: ${1}s" ;; esac
+}
+
+# show_interval : print the current interval.
+show_interval() {
+  iv=$(tmux show -t "$DASH" -v @overview_interval 2>/dev/null)
+  [ -n "$iv" ] || iv=$(interval_default)
+  case "$iv" in auto) echo "overview: refresh auto" ;; *) echo "overview: refresh ${iv}s" ;; esac
+}
+
+# _interval_item <value> : the run-shell command string a refresh-menu item runs.
+_interval_item() {
+  printf 'run-shell "OVERVIEW_SESSION=%s sh %s interval %s"' "$(rsq "$DASH")" "$(rsq "$SELF_PATH")" "$1"
+}
+
+# intervalmenu : the "refresh" preset submenu (opened from the C-a menu). Each
+# item sets the interval live; the current value is marked with a bullet.
+# OVERVIEW_PICKMENU_DRYRUN prints the assembled args instead of opening the menu.
+intervalmenu() {
+  tmux has-session -t "=$DASH" 2>/dev/null || { msg "no dashboard"; exit 1; }
+  cur=$(tmux show -t "$DASH" -v @overview_interval 2>/dev/null)
+  [ -n "$cur" ] || cur=$(interval_default)
+  m1='  '; [ "$cur" = 0.25 ] && m1='• '
+  m2='  '; [ "$cur" = 0.5 ]  && m2='• '
+  m3='  '; [ "$cur" = 1 ]    && m3='• '
+  m4='  '; [ "$cur" = 2 ]    && m4='• '
+  ma='  '; [ "$cur" = auto ] && ma='• '
+  cust="command-prompt -p \"refresh (s or auto):\" \"run-shell \\\"OVERVIEW_SESSION=$(rsq "$DASH") sh $(rsq "$SELF_PATH") interval '%%'\\\"\""
+  set -- -T '#[align=centre] overview: refresh ' \
+    "${m1}0.25s" 1 "$(_interval_item 0.25)" \
+    "${m2}0.5s"  2 "$(_interval_item 0.5)" \
+    "${m3}1s"    3 "$(_interval_item 1)" \
+    "${m4}2s"    4 "$(_interval_item 2)" \
+    "${ma}auto"  a "$(_interval_item auto)" \
+    '' 'custom…' c "$cust"
+  if [ -n "${OVERVIEW_PICKMENU_DRYRUN:-}" ]; then
+    for a in "$@"; do printf '%s\n' "$a"; done
+    return 0
+  fi
+  tmux display-menu "$@"
+}
+# ---------------------------------------------------------------------------
 
 case "$1" in
   mirror)    mirror "$2" ;;
@@ -519,6 +606,8 @@ case "$1" in
     ;;
   unpick)    unfilter ;;
   pickmenu)  pickmenu ;;
+  interval)     if [ $# -ge 2 ]; then set_interval "$2"; else show_interval; fi ;;
+  intervalmenu) intervalmenu ;;
   build|"")  build "$2" ;;
-  *) echo "usage: $0 [build [pattern]|toggle|rebuild|zoom|reconcile|kill|filter [regex]|unfilter|pick [session]|unpick|pickmenu|mirror <session>]"; exit 2 ;;
+  *) echo "usage: $0 [build [pattern]|toggle|rebuild|zoom|reconcile|kill|filter [regex]|unfilter|pick [session]|unpick|pickmenu|interval [s|auto]|intervalmenu|mirror <session>]"; exit 2 ;;
 esac

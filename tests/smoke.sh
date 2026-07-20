@@ -126,6 +126,24 @@ ov unpick >/dev/null 2>&1
 p=$(tm show -t "$DASH" -v @overview_pick 2>/dev/null)
 [ -z "$p" ] && ok "unpick clears the pick set" || no "unpick left picks: $p"
 
+echo "== refresh interval (live set / auto / validation / menu) =="
+ov interval 0.5 >/dev/null 2>&1
+[ "$(tm show -t "$DASH" -v @overview_interval 2>/dev/null)" = 0.5 ] \
+  && ok "interval 0.5 applied live" || no "interval 0.5 not applied"
+ov interval auto >/dev/null 2>&1
+[ "$(tm show -t "$DASH" -v @overview_interval 2>/dev/null)" = auto ] \
+  && ok "interval auto applied" || no "interval auto not applied"
+ib=$(tm show -t "$DASH" -v @overview_interval 2>/dev/null)
+ov interval 1.2.3 >/dev/null 2>&1; rc=$?
+ia=$(tm show -t "$DASH" -v @overview_interval 2>/dev/null)
+{ [ "$rc" != 0 ] && [ "$ib" = "$ia" ]; } && ok "invalid interval rejected, unchanged" || no "invalid interval not rejected (rc=$rc)"
+imout=$(OVERVIEW_PICKMENU_DRYRUN=1 ov intervalmenu 2>/dev/null)
+{ printf '%s\n' "$imout" | grep -q '0.25s' && printf '%s\n' "$imout" | grep -q 'auto'; } \
+  && ok "intervalmenu lists presets + auto" || no "intervalmenu missing presets"
+printf '%s\n' "$imout" | grep -q '• auto' \
+  && ok "intervalmenu marks the current value" || no "intervalmenu marker wrong"
+ov interval 1 >/dev/null 2>&1   # reset
+
 echo "== unfilter works when the dashboard is the only session left =="
 for s in "web" "api" "it's" "a b" 'x#(touch '"$PWNED"')y'; do tm kill-session -t "=$s" 2>/dev/null; done
 ov unfilter >/dev/null 2>&1; rc=$?
